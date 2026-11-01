@@ -9,7 +9,7 @@ FROM node:22-bookworm-slim
 # Pinned upstream commit (heygen-com/hyperframes @ main).
 ARG HF_REF=f98b8ead374c20e850995ba071c1da37cdbefe54
 
-# ── System deps: ffmpeg + headless-Chrome libs + fonts ───────────────────────
+# ── System deps: ffmpeg + headless-Chrome libs + fonts ───────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip git ffmpeg \
       libgbm1 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 \
@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-noto-extra fonts-noto-ui-core fonts-freefont-ttf fonts-dejavu-core fontconfig \
     && rm -rf /var/lib/apt/lists/* && fc-cache -fv
 
-# ── chrome-headless-shell (deterministic capture) ────────────────────────────
+# ── chrome-headless-shell (deterministic capture) ────────────────
 RUN npx --yes @puppeteer/browsers install chrome-headless-shell@148.0.7778.167 \
       --path /opt/puppeteer \
     && CHS="$(find /opt/puppeteer/chrome-headless-shell -name chrome-headless-shell -type f | head -n1)" \
@@ -31,20 +31,20 @@ ENV HYPERFRAMES_CHROME_PATH=/opt/chrome/chrome-headless-shell \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     CONTAINER=true
 
-# ── bun ──────────────────────────────────────────────────────────────────────
+# ── bun ──────────────────────────────────────────────────────────────
 RUN curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.9"
 ENV PATH="/root/.bun/bin:$PATH"
 
 WORKDIR /app
 
-# ── Clone upstream at the pinned ref ─────────────────────────────────────────
+# ── Clone upstream at the pinned ref ───────────────────────────────
 RUN git clone https://github.com/heygen-com/hyperframes.git /app/hf \
     && git -C /app/hf checkout "${HF_REF}"
 
 WORKDIR /app/hf
 RUN bun install --frozen-lockfile
 
-# ── Build the workspace packages: the CLI + everything it pulls in ───────────
+# ── Build the workspace packages: the CLI + everything it pulls in ─────
 RUN bun run --cwd packages/parsers build \
     && bun run --cwd packages/lint build \
     && bun run --cwd packages/studio-server build \
@@ -58,7 +58,7 @@ RUN bun run --cwd packages/parsers build \
     && bun run --cwd packages/studio build \
     && bun run --cwd packages/cli build
 
-# ── Sample projects seeded into the workspace on first boot ──────────────────
+# ── Sample projects seeded into the workspace on first boot ──────────────
 RUN mkdir -p /opt/hf-samples \
     && cp -r registry/examples/kinetic-type /opt/hf-samples/ \
     && cp -r registry/examples/product-promo /opt/hf-samples/ \
@@ -70,6 +70,8 @@ COPY package.json ./
 RUN bun install
 COPY src ./src
 COPY entrypoint.sh /usr/local/bin/entrypoint
+# Tolerate CRLF checkouts (Windows): the shebang must not carry a \r.
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint
 RUN chmod +x /usr/local/bin/entrypoint && mkdir -p /data/jobs /data/projects
 
 ENV HF_ROOT=/app/hf \
