@@ -30,6 +30,7 @@ import { promises as fs, createReadStream } from "node:fs";
 import path from "node:path";
 import { JobQueue } from "./jobs.js";
 import { renderOutputArgument } from "./render-output.js";
+import { withPublicUrls } from "./public-url.js";
 import { isAuthorized, authEnabled } from "./auth.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
@@ -138,7 +139,8 @@ function jobDetail(job) {
     finished_at: job.finishedAt,
     exit_code: job.exitCode,
     error: job.error,
-    files: jobFiles(job),
+    // renders/ entries carry a public download `url` when PUBLIC_BASE_URL is set
+    files: withPublicUrls(jobFiles(job)),
   };
   const tail = (job.tail || []).slice(-40).join("\n");
   return `${JSON.stringify(out, null, 2)}${
@@ -206,7 +208,9 @@ function buildServer() {
       description:
         "Renderiza un proyecto/composición a MP4 (u otro formato: webm, mov, gif, png-sequence). " +
         "Por defecto ENCOLA el trabajo y devuelve un job_id — el render es pesado y no debe " +
-        "bloquear la request; sigue el avance con get_job / wait_job. Usa wait=true para clips cortos.",
+        "bloquear la request; sigue el avance con get_job / wait_job. Usa wait=true para clips cortos. " +
+        'Cuando el job queda "succeeded", los archivos de renders/ llevan un campo `url` público; ' +
+        "dásela al usuario como enlace markdown.",
       inputSchema: {
         project: z.string().describe("Nombre del proyecto"),
         composition: z
@@ -313,7 +317,10 @@ function buildServer() {
   server.registerTool(
     "get_job",
     {
-      description: "Estado y log de un job (render o snapshot) por su job_id.",
+      description:
+        "Estado y log de un job (render o snapshot) por su job_id. " +
+        'Si terminó con éxito, los archivos de renders/ incluyen una `url` pública de descarga ' +
+        "(si PUBLIC_BASE_URL está configurado); pásala al usuario tal cual, como enlace markdown.",
       inputSchema: { job_id: z.string().describe("ID devuelto por render_video / snapshot_frames") },
     },
     async ({ job_id }) => {
@@ -532,7 +539,7 @@ async function startHttp() {
       res.writeHead(job ? 200 : 404, { "content-type": "application/json" });
       return res.end(
         JSON.stringify(
-          job ? { ...job, files: jobFiles(job) } : { error: "not found", job_id: id },
+          job ? { ...job, files: withPublicUrls(jobFiles(job)) } : { error: "not found", job_id: id },
           null,
           2
         )
