@@ -137,7 +137,8 @@ the server). Two env vars support that:
 
 Because the public route has no login, render filenames are randomised by
 default (see above); anything not under `renders/` must never be pointed at
-that public host.
+that public host. A ready-to-use Traefik configuration (labels and file
+provider variants) lives in [`docs/traefik.md`](docs/traefik.md).
 
 ## Env
 
