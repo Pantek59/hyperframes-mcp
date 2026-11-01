@@ -17,6 +17,8 @@
  *   MCP_TRANSPORT stdio | http (default stdio)
  *   PORT          HTTP port (default 8080)
  *   MCP_AUTH_TOKEN  if set, HTTP requires "Authorization: Bearer <token>"
+ *   HF_RANDOMIZE_OUTPUT  false restores legacy `-o` handling (default: on,
+ *                 renders get unguessable randomised paths under renders/)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -27,6 +29,7 @@ import { createServer } from "node:http";
 import { promises as fs, createReadStream } from "node:fs";
 import path from "node:path";
 import { JobQueue } from "./jobs.js";
+import { renderOutputArgument } from "./render-output.js";
 import { isAuthorized, authEnabled } from "./auth.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
@@ -210,7 +213,13 @@ function buildServer() {
           .string()
           .optional()
           .describe("Archivo de composición (ej. compositions/intro.html). Omitir = index.html"),
-        output: z.string().optional().describe("Ruta de salida (relativa al proyecto)"),
+        output: z
+          .string()
+          .optional()
+          .describe(
+            "Nombre legible para el archivo (p.ej. 'intro'); la ruta final SIEMPRE queda " +
+              "bajo renders/ del proyecto con un prefijo aleatorio no adivinable (HF_RANDOMIZE_OUTPUT=true)"
+          ),
         fps: z.string().optional().describe("FPS (24,30,60… o racional 30000/1001)"),
         quality: z
           .string()
@@ -228,7 +237,8 @@ function buildServer() {
       const dir = await resolveProject(project);
       const args = ["render", dir];
       if (composition) args.push("-c", composition);
-      if (output) args.push("-o", output);
+      const outArg = renderOutputArgument({ output, format });
+      if (outArg) args.push("-o", outArg);
       if (fps) args.push("-f", fps);
       if (quality) args.push("-q", quality);
       if (format) args.push("--format", format);
