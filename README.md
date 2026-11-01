@@ -11,10 +11,12 @@ surface of the Studio.
 |---|---|
 | `list_projects` | Lists HyperFrames projects in the workspace |
 | `list_compositions` | Lists a project's compositions (JSON) |
+| `list_assets` | Read-only listing of user-uploaded files under `<project>/assets/` (path, size, type) |
 | `lint_project` | Runs the HyperFrames linter (a11y/layout/motion) |
 | `render_video` | Renders a project/composition → mp4/webm/mov/gif/png-sequence |
 | `snapshot_frames` | Captures PNG frames for visual QA |
 | `create_project` | Scaffolds a new project from an example |
+| `write_project_file` | Writes/creates a file inside a project (HTML, CSS, SVG, JSON, base64 binaries) |
 | `get_job` | Status + log of a render/snapshot job |
 | `list_jobs` | Recent jobs and queue state |
 | `wait_job` | Blocks until a job finishes (or times out) |
@@ -30,6 +32,26 @@ immediately — a render takes minutes and must not hold the HTTP request open.
 Follow it with `get_job` / `wait_job` / `list_jobs` / `cancel_job`, or pass
 `wait: true` for short clips. Jobs are persisted to disk (`HF_JOBS_DIR`) so their
 status survives restarts; render concurrency is capped by `HF_JOB_CONCURRENCY`.
+
+### Renders get unguessable filenames
+
+By default (`HF_RANDOMIZE_OUTPUT=true`) every render is written to
+`renders/<32 random hex chars>-<readable-name><ext>` inside the project; the
+tool's `output` input is only used to build the readable suffix (traversal is
+impossible). Because the public files route relies on the path staying secret,
+these two mechanisms go together — see [Public file route](#public-file-route).
+Set `HF_RANDOMIZE_OUTPUT=false` to restore the legacy behaviour (raw `-o`,
+default CLI naming) for local use only. `png-sequence` writes frames as a
+directory `renders/<token>-<name>/`; job results list the individual frames.
+
+### Public URLs in job results
+
+When `PUBLIC_BASE_URL` is set (e.g. `https://files.example.net`, no trailing
+slash), every `files[]` entry under a project's `renders/` gets a `url` field —
+the full public download link, percent-encoded. Feed that `url` to the user as
+a markdown link; don't build URLs by hand. Snapshots, sources and assets never
+get a `url` (they are not exposed by the public route). Without the env var,
+`files[]` entries stay as plain `/files/<workspace-relative-path>` strings.
 
 ## Transports
 
@@ -75,8 +97,47 @@ If `MCP_AUTH_TOKEN` is set, add `"headers": { "Authorization": "Bearer <token>" 
 - `GET /jobs` — list jobs (queue state + recent)
 - `GET /jobs/<id>` — single job status/log
 - `POST /jobs/<id>/cancel` — cancel a job
-- `GET /files/<path>` — download rendered artifacts
+- `GET /files/<path>` — workspace file download (see below; also accepts HEAD)
 - `GET /` — tool index
+
+### Public file route
+
+Auth behaviour is uniform: when `MCP_AUTH_TOKEN` is set, every request to
+`/files/…` (like everything except `/health`) requires
+`Authorization: Bearer …` (or `x-api-key`). With no token configured the server
+itself is open — protect it at the reverse proxy.
+
+`/files/<path-relative-to-workspace>` hardening:
+
+- Traversal: raw, once- and twice-encoded `..` sequences cannot leave the
+  workspace (403/404), and a malformed `%` sequence cannot crash the server.
+- Symlinks resolving outside the workspace are refused (realpath check).
+- Correct `Content-Type` per extension, `X-Content-Type-Options: nosniff`, and
+  script-capable types (html/svg/js/xml/…) come back as
+  `Content-Disposition: attachment` — they cannot execute inline.
+- Videos send `Accept-Ranges: bytes` and honour single `Range` requests (206),
+  so browser playback can seek. `bytes=…` past EOF → 416.
+- No directory listings (404 on folders).
+
+#### Serving renders publicly (LibreChat setup)
+
+The intended reverse-proxy setup exposes **only** the renders, e.g. Traefik
+routed at `https://files.<domain>/files/{project}/renders/{file}` and nothing
+else — `/mcp`, `/jobs` and project sources stay internal (or token-protected at
+the server). Two env vars support that:
+
+- `PUBLIC_BASE_URL` — the public files host; makes job results include the
+  final `url` (see above).
+- `HF_FILES_PUBLIC_PREFIX_ONLY` — optional defence in depth on the server
+  itself: restrict `/files/` to `<project>/<prefix>/…` paths. The value may be
+  a folder name (`renders`) or a comma-separated list; `true`/`1` means
+  `renders`. **Default: off** (existing setups unaffected). Since Traefik
+  carries the only public exposure, keep this off unless you want a second
+  layer on the server.
+
+Because the public route has no login, render filenames are randomised by
+default (see above); anything not under `renders/` must never be pointed at
+that public host.
 
 ## Env
 
@@ -92,6 +153,21 @@ If `MCP_AUTH_TOKEN` is set, add `"headers": { "Authorization": "Bearer <token>" 
 | `HF_WAIT_MAX_MS` | `600000` | Cap for `wait:true` / `wait_job` |
 | `HF_ROOT` / `HF_CLI` | `/app/hf` | Upstream checkout / CLI entry |
 | `HF_RENDER_TIMEOUT_MS` | `1800000` | Render timeout (30 min) |
+| `HF_RANDOMIZE_OUTPUT` | `true` | Random unguessable `renders/<token>-<name>.mp4` outputs; `false` restores legacy `-o` handling |
+| `PUBLIC_BASE_URL` | _(empty)_ | Public files host (no trailing slash); when set, `render` jobs return `files[].url` download links |
+| `HF_FILES_PUBLIC_PREFIX_ONLY` | _(off)_ | Optional: restrict `/files/` to `<project>/<prefix>/…` (`renders`, CSV list, or `true` = `renders`) |
+
+## Development
+
+```sh
+npm install          # only needed for the MCP SDK / stdio usage
+npm test             # node --test suite (no CLI/toolchain needed)
+docker build -t hyperframes-mcp:latest .
+```
+
+Tests cover the render-output randomiser, public URL construction, the
+`list_assets` walker and the `/files/` route (traversal, ranges, content
+types, prefix restriction).
 
 ## Notes / roadmap
 

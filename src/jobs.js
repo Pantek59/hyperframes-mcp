@@ -18,6 +18,39 @@ const TAIL_LINES = Math.max(20, parseInt(process.env.HF_JOB_TAIL_LINES || "200",
 
 const TERMINAL = new Set(["succeeded", "failed", "canceled"]);
 
+// Cap for the artifact manifest collected per job, so a huge png-sequence
+// render (one file per frame) cannot flood job results.
+const MAX_LISTED_OUTPUTS = 500;
+
+/**
+ * Top-level entries of a job's outputDir; one directory level is unfolded so
+ * png-sequence output (a directory of flat PNG frames) shows up as individual
+ * downloadable files instead of a bare directory link.
+ */
+async function listDirEntries(dir) {
+  const dirents = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const sorted = dirents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const out = [];
+  for (const de of sorted) {
+    if (de.isFile()) {
+      out.push(de.name);
+      if (out.length >= MAX_LISTED_OUTPUTS) return out;
+    } else if (de.isDirectory()) {
+      const sub = await fs
+        .readdir(path.join(dir, de.name), { withFileTypes: true })
+        .catch(() => []);
+      const subSorted = sub.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const s of subSorted) {
+        if (!s.isFile()) continue;
+        out.push(`${de.name}/${s.name}`);
+        if (out.length >= MAX_LISTED_OUTPUTS) return out;
+      }
+    }
+  }
+  return out;
+}
+export { listDirEntries };
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -122,7 +155,7 @@ export class JobQueue extends EventEmitter {
       rec.error = error;
       rec.finishedAt = nowIso();
       if (rec.status === "succeeded" && rec.outputDir) {
-        rec.outputs = await fs.readdir(rec.outputDir).catch(() => []);
+        rec.outputs = await listDirEntries(rec.outputDir);
       }
       await this.#persist(rec);
       this.children.delete(rec.id);

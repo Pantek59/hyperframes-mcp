@@ -17,6 +17,8 @@
  *   MCP_TRANSPORT stdio | http (default stdio)
  *   PORT          HTTP port (default 8080)
  *   MCP_AUTH_TOKEN  if set, HTTP requires "Authorization: Bearer <token>"
+ *   HF_RANDOMIZE_OUTPUT  false restores legacy `-o` handling (default: on,
+ *                 renders get unguessable randomised paths under renders/)
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -24,9 +26,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { promises as fs, createReadStream } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { JobQueue } from "./jobs.js";
+import { renderOutputArgument } from "./render-output.js";
+import { withPublicUrls } from "./public-url.js";
+import { listAssets, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "./assets.js";
+import { handleFiles, parsePublicPrefixes } from "./files.js";
 import { isAuthorized, authEnabled } from "./auth.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
@@ -39,6 +45,8 @@ const NODE = process.execPath;
 
 const RENDER_TIMEOUT_MS = parseInt(process.env.HF_RENDER_TIMEOUT_MS || "1800000", 10);
 const WAIT_MAX_MS = parseInt(process.env.HF_WAIT_MAX_MS || "600000", 10);
+// Optional /files/ restriction to <project>/<prefix>/… (default off).
+const FILES_PUBLIC_PREFIXES = parsePublicPrefixes(process.env.HF_FILES_PUBLIC_PREFIX_ONLY);
 
 // Single shared job queue for the whole process: renders are CPU-bound, so we
 // enqueue and return a job_id instead of holding the HTTP request open.
@@ -135,7 +143,8 @@ function jobDetail(job) {
     finished_at: job.finishedAt,
     exit_code: job.exitCode,
     error: job.error,
-    files: jobFiles(job),
+    // renders/ entries carry a public download `url` when PUBLIC_BASE_URL is set
+    files: withPublicUrls(jobFiles(job)),
   };
   const tail = (job.tail || []).slice(-40).join("\n");
   return `${JSON.stringify(out, null, 2)}${
@@ -179,6 +188,38 @@ function buildServer() {
   );
 
   server.registerTool(
+    "list_assets",
+    {
+      description:
+        "Lista (SOLO LECTURA) los archivos que los usuarios subieron en <project>/assets/ " +
+        "(imágenes, audio, video, fonts). Devuelve JSON: { files, truncated } con la ruta relativa " +
+        'al proyecto tal cual se usa en las composiciones — p. ej. src="assets/logo.png" —, el tamaño ' +
+        "en bytes, fecha de modificación y tipo (image/audio/video/font/other). Añade assets a una " +
+        `composición con esa ruta. Lista recursiva hasta ${ASSETS_MAX_DEPTH} niveles de carpetas y ` +
+        `máximo ${ASSETS_MAX_ENTRIES} archivos. Sin assets/ no es error: devuelve lista vacía.`,
+      inputSchema: {
+        project: z.string().describe("Nombre del proyecto"),
+        subdir: z
+          .string()
+          .optional()
+          .describe("Subcarpeta dentro de assets/ (ej. 'logos'); no admite rutas fuera de assets/"),
+      },
+    },
+    async ({ project, subdir }) => {
+      const dir = await resolveProject(project);
+      let out;
+      try {
+        out = await listAssets(dir, subdir);
+      } catch (e) {
+        return fail(String(e.message || e));
+      }
+      return ok(
+        JSON.stringify({ project: rel(dir), subdir: subdir || undefined, ...out }, null, 2)
+      );
+    }
+  );
+
+  server.registerTool(
     "lint_project",
     {
       description:
@@ -203,14 +244,22 @@ function buildServer() {
       description:
         "Renderiza un proyecto/composición a MP4 (u otro formato: webm, mov, gif, png-sequence). " +
         "Por defecto ENCOLA el trabajo y devuelve un job_id — el render es pesado y no debe " +
-        "bloquear la request; sigue el avance con get_job / wait_job. Usa wait=true para clips cortos.",
+        "bloquear la request; sigue el avance con get_job / wait_job. Usa wait=true para clips cortos. " +
+        'Cuando el job queda "succeeded", los archivos de renders/ llevan un campo `url` público; ' +
+        "dásela al usuario como enlace markdown.",
       inputSchema: {
         project: z.string().describe("Nombre del proyecto"),
         composition: z
           .string()
           .optional()
           .describe("Archivo de composición (ej. compositions/intro.html). Omitir = index.html"),
-        output: z.string().optional().describe("Ruta de salida (relativa al proyecto)"),
+        output: z
+          .string()
+          .optional()
+          .describe(
+            "Nombre legible para el archivo (p.ej. 'intro'); la ruta final SIEMPRE queda " +
+              "bajo renders/ del proyecto con un prefijo aleatorio no adivinable (HF_RANDOMIZE_OUTPUT=true)"
+          ),
         fps: z.string().optional().describe("FPS (24,30,60… o racional 30000/1001)"),
         quality: z
           .string()
@@ -228,7 +277,8 @@ function buildServer() {
       const dir = await resolveProject(project);
       const args = ["render", dir];
       if (composition) args.push("-c", composition);
-      if (output) args.push("-o", output);
+      const outArg = renderOutputArgument({ output, format });
+      if (outArg) args.push("-o", outArg);
       if (fps) args.push("-f", fps);
       if (quality) args.push("-q", quality);
       if (format) args.push("--format", format);
@@ -303,7 +353,10 @@ function buildServer() {
   server.registerTool(
     "get_job",
     {
-      description: "Estado y log de un job (render o snapshot) por su job_id.",
+      description:
+        "Estado y log de un job (render o snapshot) por su job_id. " +
+        'Si terminó con éxito, los archivos de renders/ incluyen una `url` pública de descarga ' +
+        "(si PUBLIC_BASE_URL está configurado); pásala al usuario tal cual, como enlace markdown.",
       inputSchema: { job_id: z.string().describe("ID devuelto por render_video / snapshot_frames") },
     },
     async ({ job_id }) => {
@@ -463,6 +516,7 @@ async function startHttp() {
             tools: [
               "list_projects",
               "list_compositions",
+              "list_assets",
               "lint_project",
               "render_video",
               "snapshot_frames",
@@ -482,23 +536,11 @@ async function startHttp() {
       );
     }
 
-    // Serve rendered artifacts (mp4/png) from the workspace
-    if (req.method === "GET" && url.pathname.startsWith("/files/")) {
-      const relPath = decodeURIComponent(url.pathname.slice("/files/".length));
-      const fp = path.resolve(WORKSPACE, relPath);
-      if (fp !== WORKSPACE && !fp.startsWith(WORKSPACE + path.sep)) {
-        res.writeHead(403);
-        return res.end("forbidden");
-      }
-      try {
-        const st = await fs.stat(fp);
-        if (!st.isFile()) throw new Error("not a file");
-        res.writeHead(200, { "content-length": st.size });
-        createReadStream(fp).pipe(res);
-      } catch {
-        res.writeHead(404);
-        res.end("not found");
-      }
+    // Serve workspace files (renders, snapshots, sources) with traversal,
+    // symlink, content-type and range-request protections — see src/files.js.
+    if (
+      await handleFiles(req, res, { workspace: WORKSPACE, prefixes: FILES_PUBLIC_PREFIXES })
+    ) {
       return;
     }
 
@@ -522,7 +564,7 @@ async function startHttp() {
       res.writeHead(job ? 200 : 404, { "content-type": "application/json" });
       return res.end(
         JSON.stringify(
-          job ? { ...job, files: jobFiles(job) } : { error: "not found", job_id: id },
+          job ? { ...job, files: withPublicUrls(jobFiles(job)) } : { error: "not found", job_id: id },
           null,
           2
         )
