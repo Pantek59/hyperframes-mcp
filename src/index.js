@@ -31,6 +31,7 @@ import path from "node:path";
 import { JobQueue } from "./jobs.js";
 import { renderOutputArgument } from "./render-output.js";
 import { withPublicUrls } from "./public-url.js";
+import { listAssets, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "./assets.js";
 import { isAuthorized, authEnabled } from "./auth.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
@@ -180,6 +181,38 @@ function buildServer() {
       const dir = await resolveProject(project);
       const r = await runHF(["compositions", dir, "--json"], 120000);
       return r.code === 0 ? ok(combined(r)) : fail(combined(r));
+    }
+  );
+
+  server.registerTool(
+    "list_assets",
+    {
+      description:
+        "Lista (SOLO LECTURA) los archivos que los usuarios subieron en <project>/assets/ " +
+        "(imágenes, audio, video, fonts). Devuelve JSON: { files, truncated } con la ruta relativa " +
+        'al proyecto tal cual se usa en las composiciones — p. ej. src="assets/logo.png" —, el tamaño ' +
+        "en bytes, fecha de modificación y tipo (image/audio/video/font/other). Añade assets a una " +
+        `composición con esa ruta. Lista recursiva hasta ${ASSETS_MAX_DEPTH} niveles de carpetas y ` +
+        `máximo ${ASSETS_MAX_ENTRIES} archivos. Sin assets/ no es error: devuelve lista vacía.`,
+      inputSchema: {
+        project: z.string().describe("Nombre del proyecto"),
+        subdir: z
+          .string()
+          .optional()
+          .describe("Subcarpeta dentro de assets/ (ej. 'logos'); no admite rutas fuera de assets/"),
+      },
+    },
+    async ({ project, subdir }) => {
+      const dir = await resolveProject(project);
+      let out;
+      try {
+        out = await listAssets(dir, subdir);
+      } catch (e) {
+        return fail(String(e.message || e));
+      }
+      return ok(
+        JSON.stringify({ project: rel(dir), subdir: subdir || undefined, ...out }, null, 2)
+      );
     }
   );
 
