@@ -14,6 +14,15 @@ services:
       HF_JOBS_DIR: /data/jobs
       # Renders are CPU-bound: keep concurrency at 1 unless you size the box up.
       HF_JOB_CONCURRENCY: ${HF_JOB_CONCURRENCY:-1}
+      # Public files host (no trailing slash). When set, render jobs return a
+      # public download `url` per file under <project>/renders/**.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      # Unguessable render filenames (default true; false restores legacy
+      # CLI naming and the raw -o handling — local use only).
+      HF_RANDOMIZE_OUTPUT: ${HF_RANDOMIZE_OUTPUT:-true}
+      # Optional defence in depth: restrict /files/ to <project>/<prefix>/….
+      # Empty = off; "true" = renders; or a comma-separated prefix list.
+      HF_FILES_PUBLIC_PREFIX_ONLY: ${HF_FILES_PUBLIC_PREFIX_ONLY:-}
       PORT: "8080"
     volumes:
       - hf-mcp-projects:/data/projects
