@@ -1,7 +1,7 @@
 services:
   hyperframes-mcp:
     build:
-      context: https://github.com/mia-corral-developer/hyperframes-mcp.git#main
+      context: https://github.com/Pantek59/hyperframes-mcp.git#main
       dockerfile: Dockerfile
     image: hyperframes-mcp:latest
     restart: unless-stopped
