@@ -26,12 +26,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { execFile } from "node:child_process";
 import { createServer } from "node:http";
-import { promises as fs, createReadStream } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { JobQueue } from "./jobs.js";
 import { renderOutputArgument } from "./render-output.js";
 import { withPublicUrls } from "./public-url.js";
 import { listAssets, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "./assets.js";
+import { handleFiles, parsePublicPrefixes } from "./files.js";
 import { isAuthorized, authEnabled } from "./auth.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
@@ -44,6 +45,8 @@ const NODE = process.execPath;
 
 const RENDER_TIMEOUT_MS = parseInt(process.env.HF_RENDER_TIMEOUT_MS || "1800000", 10);
 const WAIT_MAX_MS = parseInt(process.env.HF_WAIT_MAX_MS || "600000", 10);
+// Optional /files/ restriction to <project>/<prefix>/… (default off).
+const FILES_PUBLIC_PREFIXES = parsePublicPrefixes(process.env.HF_FILES_PUBLIC_PREFIX_ONLY);
 
 // Single shared job queue for the whole process: renders are CPU-bound, so we
 // enqueue and return a job_id instead of holding the HTTP request open.
@@ -513,6 +516,7 @@ async function startHttp() {
             tools: [
               "list_projects",
               "list_compositions",
+              "list_assets",
               "lint_project",
               "render_video",
               "snapshot_frames",
@@ -532,23 +536,11 @@ async function startHttp() {
       );
     }
 
-    // Serve rendered artifacts (mp4/png) from the workspace
-    if (req.method === "GET" && url.pathname.startsWith("/files/")) {
-      const relPath = decodeURIComponent(url.pathname.slice("/files/".length));
-      const fp = path.resolve(WORKSPACE, relPath);
-      if (fp !== WORKSPACE && !fp.startsWith(WORKSPACE + path.sep)) {
-        res.writeHead(403);
-        return res.end("forbidden");
-      }
-      try {
-        const st = await fs.stat(fp);
-        if (!st.isFile()) throw new Error("not a file");
-        res.writeHead(200, { "content-length": st.size });
-        createReadStream(fp).pipe(res);
-      } catch {
-        res.writeHead(404);
-        res.end("not found");
-      }
+    // Serve workspace files (renders, snapshots, sources) with traversal,
+    // symlink, content-type and range-request protections — see src/files.js.
+    if (
+      await handleFiles(req, res, { workspace: WORKSPACE, prefixes: FILES_PUBLIC_PREFIXES })
+    ) {
       return;
     }
 
