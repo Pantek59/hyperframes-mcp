@@ -126,3 +126,16 @@ test("subdir within assets lists only that subtree", async () => {
   const { files } = await listAssets(project, "logos");
   assert.deepEqual(files.map((f) => f.path), ["assets/logos/sub.png"]);
 });
+
+test("asset and subdirectory symlink aliases retain assets-relative listing paths", async (t) => {
+  const { ws, project } = await makeProject({ withAssets: false });
+  t.after(() => rm(ws, { recursive: true, force: true }));
+  const storage = path.join(project, "storage");
+  await mkdir(path.join(storage, "audio"), { recursive: true });
+  await writeFile(path.join(storage, "audio", "voice.wav"), "x");
+  await symlink(storage, path.join(project, "assets"), "dir");
+  await symlink(path.join(storage, "audio"), path.join(storage, "alias"), "dir");
+
+  const { files } = await listAssets(project, "alias");
+  assert.deepEqual(files.map((file) => file.path), ["assets/alias/voice.wav"]);
+});

@@ -55,12 +55,14 @@ export async function listAssets(projectDir, subdir) {
   if (!insideProject(assetsReal)) return { files: [], truncated: false };
 
   let baseReal = assetsReal;
+  let baseDisplay = path.join(projectReal, "assets");
   const ask = String(subdir ?? "").trim();
   if (ask && ask !== "/" && ask !== ".") {
     const insideAssets = (p) =>
       p === assetsReal || p.startsWith(assetsReal + path.sep);
     const joined = path.resolve(baseReal, ask);
     if (!insideAssets(joined)) throw new Error(`subdir escapa de assets/: ${subdir}`);
+    baseDisplay = path.join(baseDisplay, path.relative(assetsReal, joined));
     baseReal = await fs.realpath(joined).catch(() => null);
     if (!baseReal) throw new Error(`subdir no existe: ${subdir}`);
     if (!insideAssets(baseReal)) throw new Error(`subdir escapa de assets/: ${subdir}`);
@@ -71,7 +73,7 @@ export async function listAssets(projectDir, subdir) {
   const files = [];
   let truncated = false;
 
-  async function walk(dir, depth) {
+  async function walk(dir, depth, displayDir = dir) {
     let dirents;
     try {
       dirents = await fs.readdir(dir, { withFileTypes: true });
@@ -82,6 +84,7 @@ export async function listAssets(projectDir, subdir) {
       if (truncated) return;
       if (de.name.startsWith(".")) continue;
       let real = path.join(dir, de.name);
+      const displayed = path.join(displayDir, de.name);
       if (de.isSymbolicLink()) {
         const linked = await fs.realpath(real).catch(() => null);
         if (!linked || !insideAssets(linked)) continue; // symlink fuera de assets/
@@ -94,7 +97,7 @@ export async function listAssets(projectDir, subdir) {
         continue;
       }
       if (st.isDirectory()) {
-        if (depth + 1 <= MAX_DEPTH) await walk(real, depth + 1);
+        if (depth + 1 <= MAX_DEPTH) await walk(real, depth + 1, displayed);
         continue; // más profundo que MAX_DEPTH: omitido (documentado)
       }
       if (!st.isFile()) continue;
@@ -103,7 +106,7 @@ export async function listAssets(projectDir, subdir) {
         return;
       }
       files.push({
-        path: path.relative(projectReal, real).split(path.sep).join("/"),
+        path: path.relative(projectReal, displayed).split(path.sep).join("/"),
         size: st.size,
         modified: st.mtime.toISOString(),
         type: typeFor(de.name),
@@ -111,6 +114,6 @@ export async function listAssets(projectDir, subdir) {
     }
   }
 
-  await walk(baseReal, 0);
+  await walk(baseReal, 0, baseDisplay);
   return { files, truncated };
 }

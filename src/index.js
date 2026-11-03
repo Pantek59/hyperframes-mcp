@@ -34,6 +34,8 @@ import { withPublicUrls } from "./public-url.js";
 import { listAssets, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "./assets.js";
 import { handleFiles, parsePublicPrefixes } from "./files.js";
 import { isAuthorized, authEnabled } from "./auth.js";
+import { createHiggsAudioRunner } from "./higgs-audio.js";
+import { createWhisperXRunner } from "./whisperx.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
 const HF_CLI =
@@ -44,6 +46,8 @@ const PORT = parseInt(process.env.PORT || "8080", 10);
 const NODE = process.execPath;
 
 const RENDER_TIMEOUT_MS = parseInt(process.env.HF_RENDER_TIMEOUT_MS || "1800000", 10);
+const HIGGS_AUDIO_TIMEOUT_MS = parseInt(process.env.HIGGS_AUDIO_TIMEOUT_MS || "300000", 10);
+const WHISPERX_TIMEOUT_MS = parseInt(process.env.WHISPERX_TIMEOUT_MS || "1800000", 10);
 const WAIT_MAX_MS = parseInt(process.env.HF_WAIT_MAX_MS || "600000", 10);
 // Optional /files/ restriction to <project>/<prefix>/… (default off).
 const FILES_PUBLIC_PREFIXES = parsePublicPrefixes(process.env.HF_FILES_PUBLIC_PREFIX_ONLY);
@@ -56,6 +60,8 @@ const queue = new JobQueue({
   workspace: WORKSPACE,
   defaultTimeoutMs: RENDER_TIMEOUT_MS,
 });
+queue.registerRunner("higgs_audio_tts", createHiggsAudioRunner());
+queue.registerRunner("whisperx_transcribe", createWhisperXRunner());
 
 // ── CLI runner ───────────────────────────────────────────────────────────────
 function runHF(args, timeoutMs = 600000) {
@@ -143,6 +149,8 @@ function jobDetail(job) {
     finished_at: job.finishedAt,
     exit_code: job.exitCode,
     error: job.error,
+    artifacts: job.artifacts || [],
+    warnings: job.warnings || [],
     // renders/ entries carry a public download `url` when PUBLIC_BASE_URL is set
     files: withPublicUrls(jobFiles(job)),
   };
@@ -330,6 +338,61 @@ function buildServer() {
   );
 
   server.registerTool(
+    "higgs_audio_tts",
+    {
+      description:
+        "Lee un archivo UTF-8 de assets/ y genera un WAV mediante el endpoint Higgs Audio configurado. " +
+        "El trabajo se encola en la cola compartida; consulta get_job / wait_job para obtener la ruta del resultado.",
+      inputSchema: {
+        project: z.string().describe("Nombre del proyecto"),
+        filename: z.string().describe("Archivo de texto relativo a assets/, por ejemplo narration/script.txt"),
+        wait: z.boolean().optional().describe("true = esperar el resultado. Def false = encolar."),
+        timeout_ms: z.number().int().positive().max(3600000).optional().describe("Timeout del job en ms."),
+      },
+    },
+    async ({ project, filename, wait, timeout_ms }) => {
+      const dir = await resolveProject(project);
+      const job = queue.enqueue({
+        kind: "higgs_audio_tts",
+        project: rel(dir),
+        params: { filename },
+        timeoutMs: timeout_ms ?? HIGGS_AUDIO_TIMEOUT_MS,
+      });
+      if (!wait) return ok(jobSummary(job, "Encolado. Consulta con get_job / wait_job."));
+      const done = await queue.waitFor(job.id, Math.min(timeout_ms || WAIT_MAX_MS, WAIT_MAX_MS));
+      return done && done.status === "succeeded" ? ok(jobDetail(done)) : fail(jobDetail(done || job));
+    }
+  );
+
+  server.registerTool(
+    "whisperx_transcribe",
+    {
+      description:
+        "Transcribe un archivo de audio de assets/ con WhisperX local en CPU y guarda un JSON con timestamps. " +
+        "El trabajo se encola en la cola compartida; consulta get_job / wait_job para obtener la ruta del resultado.",
+      inputSchema: {
+        project: z.string().describe("Nombre del proyecto"),
+        filename: z.string().describe("Archivo de audio relativo a assets/, por ejemplo narration/voice.wav"),
+        wait: z.boolean().optional().describe("true = esperar el resultado. Def false = encolar."),
+        timeout_ms: z.number().int().positive().max(7200000).optional().describe("Timeout del job en ms."),
+        language: z.string().regex(/^[a-z]{2,3}$/i).optional().describe("Código de idioma WhisperX (omitir para detección automática)."),
+      },
+    },
+    async ({ project, filename, wait, timeout_ms, language }) => {
+      const dir = await resolveProject(project);
+      const job = queue.enqueue({
+        kind: "whisperx_transcribe",
+        project: rel(dir),
+        params: { filename, language },
+        timeoutMs: timeout_ms ?? WHISPERX_TIMEOUT_MS,
+      });
+      if (!wait) return ok(jobSummary(job, "Encolado. Consulta con get_job / wait_job."));
+      const done = await queue.waitFor(job.id, Math.min(timeout_ms ?? WAIT_MAX_MS, WAIT_MAX_MS));
+      return done && done.status === "succeeded" ? ok(jobDetail(done)) : fail(jobDetail(done || job));
+    }
+  );
+
+  server.registerTool(
     "create_project",
     {
       description:
@@ -354,7 +417,7 @@ function buildServer() {
     "get_job",
     {
       description:
-        "Estado y log de un job (render o snapshot) por su job_id. " +
+        "Estado, log y salidas de un job (render, snapshot o audio) por su job_id. " +
         'Si terminó con éxito, los archivos de renders/ incluyen una `url` pública de descarga ' +
         "(si PUBLIC_BASE_URL está configurado); pásala al usuario tal cual, como enlace markdown.",
       inputSchema: { job_id: z.string().describe("ID devuelto por render_video / snapshot_frames") },
@@ -520,6 +583,8 @@ async function startHttp() {
               "lint_project",
               "render_video",
               "snapshot_frames",
+              "higgs_audio_tts",
+              "whisperx_transcribe",
               "create_project",
               "write_project_file",
               "get_job",
@@ -528,7 +593,6 @@ async function startHttp() {
               "cancel_job",
             ],
             jobs: "/jobs",
-            files: "/files/<path-relative-to-workspace>",
           },
           null,
           2
