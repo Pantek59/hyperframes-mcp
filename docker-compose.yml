@@ -25,14 +25,14 @@ services:
       # Optional defence in depth: restrict /files/ to <project>/<prefix>/….
       # Empty = off; "true" = renders; or a comma-separated prefix list.
       HF_FILES_PUBLIC_PREFIX_ONLY: ${HF_FILES_PUBLIC_PREFIX_ONLY:-}
-      # Optional OpenAI-compatible Higgs Audio endpoint; model and voice are deployment-specific.
-      HIGGS_AUDIO_BASE_URL: ${HIGGS_AUDIO_BASE_URL:-}
-      HIGGS_AUDIO_MODEL: ${HIGGS_AUDIO_MODEL:-}
-      HIGGS_AUDIO_VOICE: ${HIGGS_AUDIO_VOICE:-}
-      HIGGS_AUDIO_API_KEY: ${HIGGS_AUDIO_API_KEY:-}
-      HIGGS_AUDIO_TIMEOUT_MS: ${HIGGS_AUDIO_TIMEOUT_MS:-300000}
-      HIGGS_AUDIO_MAX_TEXT_BYTES: ${HIGGS_AUDIO_MAX_TEXT_BYTES:-65536}
-      HIGGS_AUDIO_MAX_AUDIO_BYTES: ${HIGGS_AUDIO_MAX_AUDIO_BYTES:-26214400}
+      # Optional OpenAI-compatible TTS-API endpoint (/v1/audio/speech); model and voice are deployment-specific.
+      TTS_API_BASE_URL: ${TTS_API_BASE_URL:-}
+      TTS_API_MODEL: ${TTS_API_MODEL:-}
+      TTS_API_VOICE: ${TTS_API_VOICE:-}
+      TTS_API_API_KEY: ${TTS_API_API_KEY:-}
+      TTS_API_TIMEOUT_MS: ${TTS_API_TIMEOUT_MS:-300000}
+      TTS_API_MAX_TEXT_BYTES: ${TTS_API_MAX_TEXT_BYTES:-65536}
+      TTS_API_MAX_AUDIO_BYTES: ${TTS_API_MAX_AUDIO_BYTES:-26214400}
       # Local CPU-only WhisperX. The named volume preserves model/alignment downloads.
       WHISPERX_EXECUTABLE: ${WHISPERX_EXECUTABLE:-/opt/whisperx-venv/bin/whisperx}
       WHISPERX_MODEL: ${WHISPERX_MODEL:-base}

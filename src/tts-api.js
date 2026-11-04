@@ -17,28 +17,28 @@ function positiveInt(value, fallback) {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-export function getHiggsAudioConfig(env = process.env) {
+export function getTtsApiConfig(env = process.env) {
   return {
-    baseUrl: String(env.HIGGS_AUDIO_BASE_URL || "").trim(),
-    model: String(env.HIGGS_AUDIO_MODEL || "").trim(),
-    voice: String(env.HIGGS_AUDIO_VOICE || "").trim(),
-    apiKey: String(env.HIGGS_AUDIO_API_KEY || "").trim(),
-    maxTextBytes: positiveInt(env.HIGGS_AUDIO_MAX_TEXT_BYTES, DEFAULT_MAX_TEXT_BYTES),
-    maxAudioBytes: positiveInt(env.HIGGS_AUDIO_MAX_AUDIO_BYTES, DEFAULT_MAX_AUDIO_BYTES),
+    baseUrl: String(env.TTS_API_BASE_URL || env.TTS_BASE_URL || "").trim(),
+    model: String(env.TTS_API_MODEL || env.TTS_MODEL || "").trim(),
+    voice: String(env.TTS_API_VOICE || env.TTS_VOICE || "").trim(),
+    apiKey: String(env.TTS_API_API_KEY || env.TTS_API_KEY || "").trim(),
+    maxTextBytes: positiveInt(env.TTS_API_MAX_TEXT_BYTES, DEFAULT_MAX_TEXT_BYTES),
+    maxAudioBytes: positiveInt(env.TTS_API_MAX_AUDIO_BYTES, DEFAULT_MAX_AUDIO_BYTES),
   };
 }
 
 function speechEndpoint(baseUrl) {
-  if (!baseUrl) throw new Error("Higgs Audio is not configured: set HIGGS_AUDIO_BASE_URL");
+  if (!baseUrl) throw new Error("TTS API is not configured: set TTS_API_BASE_URL");
   let base;
   try {
     base = new URL(baseUrl);
   } catch {
-    throw new Error("HIGGS_AUDIO_BASE_URL must be a valid HTTP(S) base URL");
+    throw new Error("TTS_API_BASE_URL must be a valid HTTP(S) base URL");
   }
   if (!new Set(["http:", "https:"]).has(base.protocol) || base.username || base.password ||
       base.search || base.hash || (base.pathname !== "/" && base.pathname !== "")) {
-    throw new Error("HIGGS_AUDIO_BASE_URL must be an HTTP(S) origin without credentials or a path");
+    throw new Error("TTS_API_BASE_URL must be an HTTP(S) origin without credentials or a path");
   }
   return new URL("/v1/audio/speech", base);
 }
@@ -76,9 +76,9 @@ async function readBoundedResponse(response, maxBytes) {
   const contentLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     await response.body?.cancel().catch(() => {});
-    throw new Error(`Higgs Audio response exceeds the ${maxBytes}-byte limit`);
+    throw new Error(`TTS API response exceeds the ${maxBytes}-byte limit`);
   }
-  if (!response.body) throw new Error("Higgs Audio returned an empty response");
+  if (!response.body) throw new Error("TTS API returned an empty response");
   const reader = response.body.getReader();
   const chunks = [];
   let size = 0;
@@ -87,7 +87,7 @@ async function readBoundedResponse(response, maxBytes) {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > maxBytes) throw new Error(`Higgs Audio response exceeds the ${maxBytes}-byte limit`);
+      if (size > maxBytes) throw new Error(`TTS API response exceeds the ${maxBytes}-byte limit`);
       chunks.push(Buffer.from(value));
     }
   } catch (error) {
@@ -102,15 +102,15 @@ async function readBoundedResponse(response, maxBytes) {
 function validateWav(buffer, contentType) {
   const mediaType = String(contentType || "").split(";", 1)[0].trim().toLowerCase();
   if (!new Set(["audio/wav", "audio/x-wav", "audio/wave"]).has(mediaType)) {
-    throw new Error("Higgs Audio response must have an audio/wav content type");
+    throw new Error("TTS API response must have an audio/wav content type");
   }
   if (buffer.length < 44 || buffer.toString("ascii", 0, 4) !== "RIFF" ||
       buffer.toString("ascii", 8, 12) !== "WAVE") {
-    throw new Error("Higgs Audio returned an invalid WAV file");
+    throw new Error("TTS API returned an invalid WAV file");
   }
   const riffLength = buffer.readUInt32LE(4);
   if (riffLength < 36 || riffLength + 8 > buffer.length) {
-    throw new Error("Higgs Audio returned a truncated or malformed WAV file");
+    throw new Error("TTS API returned a truncated or malformed WAV file");
   }
   const end = riffLength + 8;
   let offset = 12;
@@ -121,11 +121,11 @@ function validateWav(buffer, contentType) {
     const size = buffer.readUInt32LE(offset + 4);
     const start = offset + 8;
     const next = start + size + (size % 2);
-    if (next > end) throw new Error("Higgs Audio returned a truncated or malformed WAV file");
+    if (next > end) throw new Error("TTS API returned a truncated or malformed WAV file");
     if (chunk === "fmt ") {
       if (size < 16 || buffer.readUInt16LE(start) === 0 || buffer.readUInt16LE(start + 2) === 0 ||
           buffer.readUInt32LE(start + 4) === 0 || buffer.readUInt16LE(start + 12) === 0) {
-        throw new Error("Higgs Audio returned a malformed WAV format chunk");
+        throw new Error("TTS API returned a malformed WAV format chunk");
       }
       hasFormat = true;
     } else if (chunk === "data" && size > 0) {
@@ -134,17 +134,17 @@ function validateWav(buffer, contentType) {
     offset = next;
   }
   if (offset !== end || !hasFormat || !hasAudio) {
-    throw new Error("Higgs Audio returned a malformed WAV file");
+    throw new Error("TTS API returned a malformed WAV file");
   }
   return buffer;
 }
 
-export function createHiggsAudioRunner({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
+export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
   return async (job, { workspace, signal }) => {
-    const config = getHiggsAudioConfig(env);
+    const config = getTtsApiConfig(env);
     const endpoint = speechEndpoint(config.baseUrl);
-    if (!config.model) throw new Error("Higgs Audio is not configured: set HIGGS_AUDIO_MODEL");
-    if (!config.voice) throw new Error("Higgs Audio is not configured: set HIGGS_AUDIO_VOICE");
+    if (!config.model) throw new Error("TTS API is not configured: set TTS_API_MODEL");
+    if (!config.voice) throw new Error("TTS API is not configured: set TTS_API_VOICE");
     if (typeof fetchImpl !== "function") throw new Error("This Node.js runtime does not provide fetch");
 
     const filename = job.params?.filename;
@@ -169,7 +169,7 @@ export function createHiggsAudioRunner({ env = process.env, fetchImpl = globalTh
     });
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      throw new Error(`Higgs Audio API returned HTTP ${response.status}`);
+      throw new Error(`TTS API returned HTTP ${response.status}`);
     }
     const audio = validateWav(
       await readBoundedResponse(response, config.maxAudioBytes),

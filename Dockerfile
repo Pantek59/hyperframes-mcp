@@ -12,14 +12,33 @@ FROM node:22-bookworm-slim
 ARG HF_REPO=https://github.com/Pantek59/hyperframes.git
 ARG HF_REF=f98b8ead374c20e850995ba071c1da37cdbefe54
 
-# ── System deps: ffmpeg + headless-Chrome libs + fonts ───────────────
+# ── System deps: ffmpeg + headless-Chrome libs + fonts + python ───────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl unzip git ffmpeg \
+      ca-certificates curl unzip git ffmpeg python3.11 python3.11-venv \
       libgbm1 libnss3 libatk-bridge2.0-0 libdrm2 libxcomposite1 libxdamage1 \
       libxrandr2 libcups2 libasound2 libpangocairo-1.0-0 libxshmfence1 libgtk-3-0 \
       fonts-liberation fonts-noto-color-emoji fonts-noto-cjk fonts-noto-core \
       fonts-noto-extra fonts-noto-ui-core fonts-freefont-ttf fonts-dejavu-core fontconfig \
     && rm -rf /var/lib/apt/lists/* && fc-cache -fv
+
+# WhisperX 3.8.6 supports Python 3.10–3.13; keep this CPU image on Python 3.11
+# and install matching CPU-only PyTorch wheels before resolving WhisperX.
+ARG WHISPERX_VERSION=3.8.6
+ARG PYTORCH_VERSION=2.8.0
+ARG TORCHVISION_VERSION=0.23.0
+RUN python3.11 -m venv /opt/whisperx-venv \
+    && /opt/whisperx-venv/bin/pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cpu \
+      --extra-index-url https://pypi.org/simple \
+      "torch==${PYTORCH_VERSION}+cpu" \
+      "torchaudio==${PYTORCH_VERSION}+cpu" \
+      "torchvision==${TORCHVISION_VERSION}+cpu" \
+    && /opt/whisperx-venv/bin/pip install --no-cache-dir "whisperx==${WHISPERX_VERSION}" \
+    && /opt/whisperx-venv/bin/whisperx --help >/dev/null
+
+ENV PATH="/opt/whisperx-venv/bin:$PATH" \
+    WHISPERX_EXECUTABLE=/opt/whisperx-venv/bin/whisperx \
+    WHISPERX_MODEL_CACHE_DIR=/data/whisperx-cache
 
 # ── chrome-headless-shell (deterministic capture) ────────────────
 RUN npx --yes @puppeteer/browsers install chrome-headless-shell@148.0.7778.167 \
@@ -76,6 +95,10 @@ COPY entrypoint.sh /usr/local/bin/entrypoint
 # Tolerate CRLF checkouts (Windows): the shebang must not carry a \r.
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint
 RUN chmod +x /usr/local/bin/entrypoint && mkdir -p /data/jobs /data/projects
+
+# TorchCodec loads the Python shared library alongside the bundled FFmpeg 5 libs.
+RUN apt-get update && apt-get install -y --no-install-recommends libpython3.11 \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV HF_ROOT=/app/hf \
     HF_WORKSPACE=/data/projects \

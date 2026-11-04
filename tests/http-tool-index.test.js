@@ -39,7 +39,7 @@ function makeWav() {
   return wav;
 }
 
-test("HTTP tool index advertises Higgs Audio TTS", { timeout: 15000 }, async (t) => {
+test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   const workspace = await mkdtemp(path.join(tmpdir(), "hf-http-index-"));
   const port = await unusedPort();
   const projectAssets = path.join(workspace, "project", "assets", "narration");
@@ -54,7 +54,7 @@ test("HTTP tool index advertises Higgs Audio TTS", { timeout: 15000 }, async (t)
     response.end(makeWav());
   });
   await new Promise((resolve) => service.listen(0, "127.0.0.1", resolve));
-  const higgsUrl = `http://127.0.0.1:${service.address().port}`;
+  const ttsUrl = `http://127.0.0.1:${service.address().port}`;
   t.after(() => new Promise((resolve, reject) => service.close((error) => error ? reject(error) : resolve())));
   const child = spawn(process.execPath, ["src/index.js"], {
     cwd: ROOT,
@@ -65,11 +65,11 @@ test("HTTP tool index advertises Higgs Audio TTS", { timeout: 15000 }, async (t)
       HF_WORKSPACE: workspace,
       HF_JOBS_DIR: path.join(workspace, "jobs"),
       MCP_AUTH_TOKEN: "http-index-test-token",
-      HIGGS_AUDIO_BASE_URL: higgsUrl,
-      HIGGS_AUDIO_MODEL: "mcp-test-model",
-      HIGGS_AUDIO_VOICE: "mcp-test-voice",
-      HIGGS_AUDIO_API_KEY: "",
-      HIGGS_AUDIO_TIMEOUT_MS: "5000",
+      TTS_API_BASE_URL: ttsUrl,
+      TTS_API_MODEL: "mcp-test-model",
+      TTS_API_VOICE: "mcp-test-voice",
+      TTS_API_API_KEY: "",
+      TTS_API_TIMEOUT_MS: "5000",
       HF_WAIT_MAX_MS: "5000",
     },
     stdio: "ignore",
@@ -109,7 +109,7 @@ test("HTTP tool index advertises Higgs Audio TTS", { timeout: 15000 }, async (t)
   assert.ok(response, "HTTP MCP server should start");
   assert.equal(response.status, 200);
   const index = await response.json();
-  assert.ok(index.tools.includes("higgs_audio_tts"));
+  assert.ok(index.tools.includes("tts_generate"));
   assert.ok(index.tools.includes("whisperx_transcribe"));
 
   const mcp = await fetch(`${url}/mcp`, {
@@ -123,7 +123,7 @@ test("HTTP tool index advertises Higgs Audio TTS", { timeout: 15000 }, async (t)
   });
   assert.equal(mcp.status, 200);
   const toolResponse = await mcp.json();
-  assert.ok(toolResponse.result.tools.some((tool) => tool.name === "higgs_audio_tts"));
+  assert.ok(toolResponse.result.tools.some((tool) => tool.name === "tts_generate"));
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "whisperx_transcribe"));
 
   const callTool = async (args) => {
@@ -138,7 +138,7 @@ test("HTTP tool index advertises Higgs Audio TTS", { timeout: 15000 }, async (t)
         jsonrpc: "2.0",
         id: 2,
         method: "tools/call",
-        params: { name: "higgs_audio_tts", arguments: args },
+        params: { name: "tts_generate", arguments: args },
       }),
     });
     assert.equal(result.status, 200);

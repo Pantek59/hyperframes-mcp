@@ -34,7 +34,7 @@ import { withPublicUrls } from "./public-url.js";
 import { listAssets, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "./assets.js";
 import { handleFiles, parsePublicPrefixes } from "./files.js";
 import { isAuthorized, authEnabled } from "./auth.js";
-import { createHiggsAudioRunner } from "./higgs-audio.js";
+import { createTtsApiRunner } from "./tts-api.js";
 import { createWhisperXRunner } from "./whisperx.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
@@ -46,7 +46,7 @@ const PORT = parseInt(process.env.PORT || "8080", 10);
 const NODE = process.execPath;
 
 const RENDER_TIMEOUT_MS = parseInt(process.env.HF_RENDER_TIMEOUT_MS || "1800000", 10);
-const HIGGS_AUDIO_TIMEOUT_MS = parseInt(process.env.HIGGS_AUDIO_TIMEOUT_MS || "300000", 10);
+const TTS_API_TIMEOUT_MS = parseInt(process.env.TTS_API_TIMEOUT_MS || "300000", 10);
 const WHISPERX_TIMEOUT_MS = parseInt(process.env.WHISPERX_TIMEOUT_MS || "1800000", 10);
 const WAIT_MAX_MS = parseInt(process.env.HF_WAIT_MAX_MS || "600000", 10);
 // Optional /files/ restriction to <project>/<prefix>/… (default off).
@@ -60,7 +60,7 @@ const queue = new JobQueue({
   workspace: WORKSPACE,
   defaultTimeoutMs: RENDER_TIMEOUT_MS,
 });
-queue.registerRunner("higgs_audio_tts", createHiggsAudioRunner());
+queue.registerRunner("tts_generate", createTtsApiRunner());
 queue.registerRunner("whisperx_transcribe", createWhisperXRunner());
 
 // ── CLI runner ───────────────────────────────────────────────────────────────
@@ -338,10 +338,10 @@ function buildServer() {
   );
 
   server.registerTool(
-    "higgs_audio_tts",
+    "tts_generate",
     {
       description:
-        "Lee un archivo UTF-8 de assets/ y genera un WAV mediante el endpoint Higgs Audio configurado. " +
+        "Lee un archivo UTF-8 de assets/ y genera un WAV mediante el endpoint TTS-API configurado (/v1/audio/speech). " +
         "El trabajo se encola en la cola compartida; consulta get_job / wait_job para obtener la ruta del resultado.",
       inputSchema: {
         project: z.string().describe("Nombre del proyecto"),
@@ -353,10 +353,10 @@ function buildServer() {
     async ({ project, filename, wait, timeout_ms }) => {
       const dir = await resolveProject(project);
       const job = queue.enqueue({
-        kind: "higgs_audio_tts",
+        kind: "tts_generate",
         project: rel(dir),
         params: { filename },
-        timeoutMs: timeout_ms ?? HIGGS_AUDIO_TIMEOUT_MS,
+        timeoutMs: timeout_ms ?? TTS_API_TIMEOUT_MS,
       });
       if (!wait) return ok(jobSummary(job, "Encolado. Consulta con get_job / wait_job."));
       const done = await queue.waitFor(job.id, Math.min(timeout_ms || WAIT_MAX_MS, WAIT_MAX_MS));
@@ -583,7 +583,7 @@ async function startHttp() {
               "lint_project",
               "render_video",
               "snapshot_frames",
-              "higgs_audio_tts",
+              "tts_generate",
               "whisperx_transcribe",
               "create_project",
               "write_project_file",

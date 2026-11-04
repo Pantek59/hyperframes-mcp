@@ -15,6 +15,8 @@ surface of the Studio.
 | `lint_project` | Runs the HyperFrames linter (a11y/layout/motion) |
 | `render_video` | Renders a project/composition → mp4/webm/mov/gif/png-sequence |
 | `snapshot_frames` | Captures PNG frames for visual QA |
+| `tts_generate` | Reads a UTF-8 text file from `assets/` and generates a WAV asset via the configured OpenAI-compatible TTS-API |
+| `whisperx_transcribe` | Transcribes an audio file from `assets/` with local CPU WhisperX into a timed JSON transcript |
 | `create_project` | Scaffolds a new project from an example |
 | `write_project_file` | Writes/creates a file inside a project (HTML, CSS, SVG, JSON, base64 binaries) |
 | `get_job` | Status + log of a render/snapshot job |
@@ -27,11 +29,16 @@ no external accounts or credits are needed.
 
 ### Heavy ops are queued
 
-`render_video` and `snapshot_frames` **enqueue** the work and return a `job_id`
-immediately — a render takes minutes and must not hold the HTTP request open.
+`render_video`, `snapshot_frames`, `tts_generate`, and `whisperx_transcribe` **enqueue** the work and return a `job_id`
+immediately — renders and local transcription take time and must not hold the HTTP request open.
 Follow it with `get_job` / `wait_job` / `list_jobs` / `cancel_job`, or pass
-`wait: true` for short clips. Jobs are persisted to disk (`HF_JOBS_DIR`) so their
-status survives restarts; render concurrency is capped by `HF_JOB_CONCURRENCY`.
+`wait: true` for quick operations. Jobs are persisted to disk (`HF_JOBS_DIR`) so their
+status survives restarts; background job concurrency is capped by `HF_JOB_CONCURRENCY`.
+
+### Audio generation and transcription
+
+- **`tts_generate`:** Reads UTF-8 text from `<project>/assets/...` and calls a configured OpenAI-compatible TTS endpoint (`/v1/audio/speech`). Generates a `.wav` file saved directly next to the input file in `assets/`.
+- **`whisperx_transcribe`:** Runs WhisperX locally on CPU against an audio file under `<project>/assets/...`. Saves a timed JSON transcript with word- and segment-level timestamps next to the original asset. Models are downloaded on first use and cached persistently (`WHISPERX_MODEL_CACHE_DIR`).
 
 ### Renders get unguessable filenames
 
@@ -157,6 +164,19 @@ provider variants) lives in [`docs/traefik.md`](docs/traefik.md).
 | `HF_RANDOMIZE_OUTPUT` | `true` | Random unguessable `renders/<token>-<name>.mp4` outputs; `false` restores legacy `-o` handling |
 | `PUBLIC_BASE_URL` | _(empty)_ | Public files host (no trailing slash); when set, `render` jobs return `files[].url` download links |
 | `HF_FILES_PUBLIC_PREFIX_ONLY` | _(off)_ | Optional: restrict `/files/` to `<project>/<prefix>/…` (`renders`, CSV list, or `true` = `renders`) |
+| `TTS_API_BASE_URL` | _(empty)_ | Base URL of OpenAI-compatible TTS endpoint (appends `/v1/audio/speech`) |
+| `TTS_API_MODEL` | _(empty)_ | TTS model identifier |
+| `TTS_API_VOICE` | _(empty)_ | TTS voice identifier |
+| `TTS_API_API_KEY` | _(empty)_ | Optional bearer token for TTS API |
+| `TTS_API_TIMEOUT_MS` | `300000` | TTS request timeout (5 min) |
+| `TTS_API_MAX_TEXT_BYTES` | `65536` | Max UTF-8 text payload for TTS (64 KB) |
+| `TTS_API_MAX_AUDIO_BYTES` | `26214400` | Max generated WAV audio response size (25 MB) |
+| `WHISPERX_EXECUTABLE` | `/opt/whisperx-venv/bin/whisperx` | Path to WhisperX executable |
+| `WHISPERX_MODEL` | `base` | WhisperX model to use for CPU transcription |
+| `WHISPERX_MODEL_CACHE_DIR` | `/data/whisperx-cache` | Directory where WhisperX persists model downloads |
+| `WHISPERX_TIMEOUT_MS` | `1800000` | WhisperX transcription timeout (30 min) |
+| `WHISPERX_MAX_AUDIO_BYTES` | `524288000` | Max input audio file size for transcription (500 MB) |
+| `WHISPERX_MAX_JSON_BYTES` | `20971520` | Max transcript output JSON size (20 MB) |
 
 ## Development
 
@@ -167,14 +187,14 @@ docker build -t hyperframes-mcp:latest .
 ```
 
 Tests cover the render-output randomiser, public URL construction, the
-`list_assets` walker and the `/files/` route (traversal, ranges, content
-types, prefix restriction).
+`list_assets` walker, TTS-API integration, WhisperX execution, and the
+`/files/` route (traversal, ranges, content types, prefix restriction).
 
 ## Notes / roadmap
 
 - Rendering is CPU/RAM heavy → it runs through a **persistent job queue**
   (`src/jobs.js`) with capped concurrency, so the MCP request returns instantly.
-- The image is large (Chrome + ffmpeg + the full toolchain) and the build clones
+- The image is large (Chrome + ffmpeg + CPU PyTorch/WhisperX + the full toolchain) and the build clones
   **our fork** of upstream (`Pantek59/hyperframes`, pinned with `HF_REF`) for
   reproducibility — the fork keeps working even if the upstream repo is removed.
 - CI builds and publishes the image to GHCR (`ghcr.io/pantek59/hyperframes-mcp`)

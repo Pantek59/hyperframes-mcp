@@ -4,12 +4,12 @@ import { createServer } from "node:http";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createHiggsAudioRunner } from "../src/higgs-audio.js";
+import { createTtsApiRunner } from "../src/tts-api.js";
 
 const BASE_ENV = {
-  HIGGS_AUDIO_MODEL: "higgs-test-model",
-  HIGGS_AUDIO_VOICE: "test-voice",
-  HIGGS_AUDIO_API_KEY: "test-secret",
+  TTS_API_MODEL: "tts-test-model",
+  TTS_API_VOICE: "test-voice",
+  TTS_API_API_KEY: "test-secret",
 };
 
 function makeWav() {
@@ -42,7 +42,7 @@ async function startService(handler) {
 }
 
 async function makeInput(t, content = "Hello from a project asset.") {
-  const workspace = await mkdtemp(path.join(tmpdir(), "hf-higgs-"));
+  const workspace = await mkdtemp(path.join(tmpdir(), "hf-tts-"));
   const projectDir = path.join(workspace, "project");
   const assetsDir = path.join(projectDir, "assets", "narration");
   await mkdir(assetsDir, { recursive: true });
@@ -72,7 +72,7 @@ test("posts the OpenAI-compatible request and publishes only this job's WAV arti
   });
   t.after(service.close);
   const { workspace, assetsDir } = await makeInput(t);
-  const runner = createHiggsAudioRunner({ env: { ...BASE_ENV, HIGGS_AUDIO_BASE_URL: service.baseUrl } });
+  const runner = createTtsApiRunner({ env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl } });
 
   const result = await runner(job(), { workspace, signal: new AbortController().signal });
 
@@ -81,7 +81,7 @@ test("posts the OpenAI-compatible request and publishes only this job's WAV arti
   assert.equal(observed.url, "/v1/audio/speech");
   assert.equal(observed.headers.authorization, "Bearer test-secret");
   assert.deepEqual(observed.body, {
-    model: "higgs-test-model",
+    model: "tts-test-model",
     input: "Hello from a project asset.",
     voice: "test-voice",
     response_format: "wav",
@@ -97,7 +97,7 @@ test("does not leak remote error bodies or create output on service errors", asy
   });
   t.after(service.close);
   const { workspace, assetsDir } = await makeInput(t);
-  const runner = createHiggsAudioRunner({ env: { ...BASE_ENV, HIGGS_AUDIO_BASE_URL: service.baseUrl } });
+  const runner = createTtsApiRunner({ env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl } });
 
   await assert.rejects(
     () => runner(job(), { workspace, signal: new AbortController().signal }),
@@ -113,7 +113,7 @@ test("rejects malformed or non-WAV successful responses", async (t) => {
   });
   t.after(service.close);
   const { workspace, assetsDir } = await makeInput(t);
-  const runner = createHiggsAudioRunner({ env: { ...BASE_ENV, HIGGS_AUDIO_BASE_URL: service.baseUrl } });
+  const runner = createTtsApiRunner({ env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl } });
 
   await assert.rejects(
     () => runner(job(), { workspace, signal: new AbortController().signal }),
@@ -131,7 +131,7 @@ test("rejects WAV headers with truncated chunk data", async (t) => {
   });
   t.after(service.close);
   const { workspace, assetsDir } = await makeInput(t);
-  const runner = createHiggsAudioRunner({ env: { ...BASE_ENV, HIGGS_AUDIO_BASE_URL: service.baseUrl } });
+  const runner = createTtsApiRunner({ env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl } });
 
   await assert.rejects(
     () => runner(job(), { workspace, signal: new AbortController().signal }),
@@ -140,7 +140,7 @@ test("rejects WAV headers with truncated chunk data", async (t) => {
   assert.deepEqual(await readdir(assetsDir), ["script.txt"]);
 });
 
-test("rejects oversized text before contacting Higgs and rejects oversized audio", async (t) => {
+test("rejects oversized text before contacting TTS API and rejects oversized audio", async (t) => {
   let requests = 0;
   const service = await startService((_request, response) => {
     requests += 1;
@@ -149,15 +149,15 @@ test("rejects oversized text before contacting Higgs and rejects oversized audio
   });
   t.after(service.close);
   const { workspace, assetsDir } = await makeInput(t, "text that exceeds the limit");
-  const base = { ...BASE_ENV, HIGGS_AUDIO_BASE_URL: service.baseUrl };
-  const textLimited = createHiggsAudioRunner({ env: { ...base, HIGGS_AUDIO_MAX_TEXT_BYTES: "5" } });
+  const base = { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl };
+  const textLimited = createTtsApiRunner({ env: { ...base, TTS_API_MAX_TEXT_BYTES: "5" } });
   await assert.rejects(
     () => textLimited(job(), { workspace, signal: new AbortController().signal }),
     /text exceeds/
   );
   assert.equal(requests, 0);
 
-  const audioLimited = createHiggsAudioRunner({ env: { ...base, HIGGS_AUDIO_MAX_AUDIO_BYTES: "40" } });
+  const audioLimited = createTtsApiRunner({ env: { ...base, TTS_API_MAX_AUDIO_BYTES: "40" } });
   await assert.rejects(
     () => audioLimited(job(), { workspace, signal: new AbortController().signal }),
     /response exceeds/
@@ -175,7 +175,7 @@ test("rejects malformed UTF-8 text without sending it to the service", async (t)
   });
   t.after(service.close);
   const { workspace, assetsDir } = await makeInput(t, Buffer.from([0xc3, 0x28]));
-  const runner = createHiggsAudioRunner({ env: { ...BASE_ENV, HIGGS_AUDIO_BASE_URL: service.baseUrl } });
+  const runner = createTtsApiRunner({ env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl } });
 
   await assert.rejects(
     () => runner(job(), { workspace, signal: new AbortController().signal }),
@@ -194,7 +194,7 @@ test("aborts an in-flight HTTP request when the shared job signal is canceled", 
   });
   t.after(service.close);
   const { workspace, assetsDir } = await makeInput(t);
-  const runner = createHiggsAudioRunner({ env: { ...BASE_ENV, HIGGS_AUDIO_BASE_URL: service.baseUrl } });
+  const runner = createTtsApiRunner({ env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl } });
   const controller = new AbortController();
   const running = runner(job(), { workspace, signal: controller.signal });
   await requestStarted;
@@ -204,12 +204,12 @@ test("aborts an in-flight HTTP request when the shared job signal is canceled", 
   assert.deepEqual(await readdir(assetsDir), ["script.txt"]);
 });
 
-test("fails an unconfigured Higgs runner with an actionable message", async (t) => {
+test("fails an unconfigured TTS API runner with an actionable message", async (t) => {
   const { workspace } = await makeInput(t);
-  const runner = createHiggsAudioRunner({ env: {} });
+  const runner = createTtsApiRunner({ env: {} });
 
   await assert.rejects(
     () => runner(job(), { workspace, signal: new AbortController().signal }),
-    /HIGGS_AUDIO_BASE_URL/
+    /TTS_API_BASE_URL/
   );
 });
