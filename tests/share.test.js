@@ -66,7 +66,7 @@ test("derives a readable suffix from the filename when name is omitted", async (
   assert.equal(shared.path, `/files/project/renders/${path.basename(shared.path)}`);
 });
 
-test("rejects missing renders dir and assets escaping", async (t) => {
+test("creates a fresh renders/ dir; assets escaping stay rejected", async (t) => {
   const workspace = await mkdtemp(path.join(tmpdir(), "hf-share-"));
   const projectDir = path.join(workspace, "project");
   await mkdir(path.join(projectDir, "assets"), { recursive: true });
@@ -74,10 +74,13 @@ test("rejects missing renders dir and assets escaping", async (t) => {
   t.after(() => rm(workspace, { recursive: true, force: true }));
   const ctx = { workspace, projectDir };
 
-  await assert.rejects(
-    () => shareAssetToRenders({ ...ctx, filename: "a.wav" }),
-    /renders directory is missing/
+  // fresh project without renders/ — the tool creates it
+  const shared = await shareAssetToRenders({ ...ctx, filename: "a.wav", publicBaseUrl: "" });
+  assert.equal(
+    await readFile(path.join(projectDir, "renders", path.basename(shared.path)), "utf8"),
+    "x"
   );
+
   await assert.rejects(
     () => shareAssetToRenders({ ...ctx, filename: "../index.html" }),
     /assets/

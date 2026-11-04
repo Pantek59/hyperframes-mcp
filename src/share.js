@@ -29,11 +29,16 @@ export async function shareAssetToRenders({
 } = {}) {
   const input = await resolveAssetInput({ workspace, projectDir, filename });
 
-  const rendersReal = await fs
+  let rendersReal = await fs
     .realpath(path.join(input.projectReal, "renders"))
     .catch(() => null);
   if (!rendersReal || !rendersReal.startsWith(input.projectReal + path.sep)) {
-    throw new Error("Project renders directory is missing");
+    // Fresh projects have no renders/ yet — create it rather than fail.
+    await fs.mkdir(path.join(input.projectReal, "renders"), { recursive: true });
+    rendersReal = await fs.realpath(path.join(input.projectReal, "renders"));
+  }
+  if (!rendersReal.startsWith(input.projectReal + path.sep)) {
+    throw new Error("Project renders directory is missing or unsafe");
   }
 
   const token = randomBytes(16).toString("hex");
