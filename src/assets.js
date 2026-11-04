@@ -41,6 +41,21 @@ export const ASSETS_MAX_DEPTH = MAX_DEPTH;
 export const ASSETS_MAX_ENTRIES = MAX_ENTRIES;
 
 /**
+ * Attach the workspace-relative /files/ route to each listing entry so agents
+ * can reference (and share_asset can publish) assets unambiguously. Every path
+ * segment is percent-encoded; the /files/ route decodes exactly once, so
+ * non-ASCII names round-trip and literal '%'/traversal cannot be injected.
+ */
+export function addFileLinks(files, project) {
+  return files.map((entry) => {
+    if (!entry || typeof entry.path !== "string") return entry;
+    const wsRel = [project, entry.path].map((s) => s.split("/")).flat()
+      .filter((seg) => seg && seg !== ".").map(encodeURIComponent).join("/");
+    return { ...entry, link: `/files/${wsRel}` };
+  });
+}
+
+/**
  * List files under <projectDir>/assets/. Returns { files, truncated }; each
  * file is { path: "assets/…", size, modified, type }. Throws for an invalid
  * `subdir` (escaping assets/, or nonexistent). A missing assets/ directory is

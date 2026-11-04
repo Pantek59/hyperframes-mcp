@@ -31,7 +31,7 @@ import path from "node:path";
 import { JobQueue } from "./jobs.js";
 import { renderOutputArgument } from "./render-output.js";
 import { withPublicUrls } from "./public-url.js";
-import { listAssets, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "./assets.js";
+import { listAssets, addFileLinks, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "./assets.js";
 import { handleFiles, parsePublicPrefixes } from "./files.js";
 import { isAuthorized, authEnabled } from "./auth.js";
 import { createTtsApiRunner } from "./tts-api.js";
@@ -205,9 +205,11 @@ function buildServer() {
         "Lista (SOLO LECTURA) los archivos que los usuarios subieron en <project>/assets/ " +
         "(imágenes, audio, video, fonts). Devuelve JSON: { files, truncated } con la ruta relativa " +
         'al proyecto tal cual se usa en las composiciones — p. ej. src="assets/logo.png" —, el tamaño ' +
-        "en bytes, fecha de modificación y tipo (image/audio/video/font/other). Añade assets a una " +
-        `composición con esa ruta. Lista recursiva hasta ${ASSETS_MAX_DEPTH} niveles de carpetas y ` +
-        `máximo ${ASSETS_MAX_ENTRIES} archivos. Sin assets/ no es error: devuelve lista vacía.`,
+        "en bytes, fecha de modificación y tipo (image/audio/video/font/other). Cada entrada lleva " +
+        "`link` = ruta interna /files/<project>/assets/… (requiere Authorization Bearer). Para enlaces " +
+        "públicos clicables usa share_asset. Añade assets a una composición con esa ruta. Lista " +
+        `recursiva hasta ${ASSETS_MAX_DEPTH} niveles de carpetas y máximo ${ASSETS_MAX_ENTRIES} archivos. ` +
+        "Sin assets/ no es error: devuelve lista vacía.",
       inputSchema: {
         project: z.string().describe("Nombre del proyecto"),
         subdir: z
@@ -224,8 +226,9 @@ function buildServer() {
       } catch (e) {
         return fail(String(e.message || e));
       }
+      const files = addFileLinks(out.files, rel(dir));
       return ok(
-        JSON.stringify({ project: rel(dir), subdir: subdir || undefined, ...out }, null, 2)
+        JSON.stringify({ project: rel(dir), subdir: subdir || undefined, files, truncated: out.truncated }, null, 2)
       );
     }
   );

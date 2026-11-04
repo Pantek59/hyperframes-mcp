@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { listAssets, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "../src/assets.js";
+import { listAssets, addFileLinks, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "../src/assets.js";
 
 const OUTSIDE = await mkdtemp(path.join(tmpdir(), "hf-outside-"));
 
@@ -138,4 +138,18 @@ test("asset and subdirectory symlink aliases retain assets-relative listing path
 
   const { files } = await listAssets(project, "alias");
   assert.deepEqual(files.map((file) => file.path), ["assets/alias/voice.wav"]);
+});
+
+test("addFileLinks attaches percent-encoded /files/ route per entry", () => {
+  const files = [
+    { path: "assets/voice 1.mp3", size: 1, modified: "x", type: "audio" },
+    { path: "assets/naïve name/logo.png", size: 2, modified: "x", type: "image" },
+    { path: "assets/..%2Fevil.mp3", size: 3, modified: "x", type: "audio" },
+    null,
+  ];
+  const linked = addFileLinks(files, "my project");
+  assert.equal(linked[0].link, "/files/my%20project/assets/voice%201.mp3");
+  assert.equal(linked[1].link, "/files/my%20project/assets/na%C3%AFve%20name/logo.png");
+  assert.equal(linked[2].link, "/files/my%20project/assets/..%252Fevil.mp3"); // '%' encoded → no traversal
+  assert.equal(linked[3], null);
 });
