@@ -185,6 +185,34 @@ test("rejects malformed UTF-8 text without sending it to the service", async (t)
   assert.deepEqual(await readdir(assetsDir), ["script.txt"]);
 });
 
+test("per-call voice param overrides the configured voice", async (t) => {
+  let observed;
+  const service = await startService(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    observed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    response.writeHead(200, { "content-type": "audio/wav" });
+    response.end(makeWav());
+  });
+  t.after(service.close);
+  const { workspace } = await makeInput(t);
+  const runner = createTtsApiRunner({ env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl } });
+
+  await runner({ ...job("v1"), params: { ...job("v1").params, voice: "cloned-narrator" } }, { workspace, signal: new AbortController().signal });
+  assert.equal(observed.voice, "cloned-narrator");
+
+  await runner({ ...job("v2"), params: { ...job("v2").params } }, { workspace, signal: new AbortController().signal });
+  assert.equal(observed.voice, "test-voice");
+
+  await assert.rejects(
+    () => createTtsApiRunner({ env: { TTS_API_BASE_URL: service.baseUrl, TTS_API_MODEL: "m" }})(
+      { ...job("v3"), params: { ...job("v3").params, voice: "" } },
+      { workspace, signal: new AbortController().signal }
+    ),
+    /TTS_API_VOICE/
+  );
+});
+
 test("aborts an in-flight HTTP request when the shared job signal is canceled", async (t) => {
   let accepted;
   const requestStarted = new Promise((resolve) => { accepted = resolve; });

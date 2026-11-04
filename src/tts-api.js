@@ -144,7 +144,9 @@ export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.f
     const config = getTtsApiConfig(env);
     const endpoint = speechEndpoint(config.baseUrl);
     if (!config.model) throw new Error("TTS API is not configured: set TTS_API_MODEL");
-    if (!config.voice) throw new Error("TTS API is not configured: set TTS_API_VOICE");
+    // Per-call voice override (e.g. a cloned voice registered via tts_upload_voice)
+    const voice = String(job.params?.voice ?? config.voice ?? "").trim();
+    if (!voice) throw new Error("TTS API is not configured: set TTS_API_VOICE");
     if (typeof fetchImpl !== "function") throw new Error("This Node.js runtime does not provide fetch");
 
     const filename = job.params?.filename;
@@ -161,7 +163,7 @@ export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.f
       body: JSON.stringify({
         model: config.model,
         input: text,
-        voice: config.voice,
+        voice: voice,
         response_format: "wav",
       }),
       signal,

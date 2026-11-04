@@ -15,7 +15,10 @@ surface of the Studio.
 | `lint_project` | Runs the HyperFrames linter (a11y/layout/motion) |
 | `render_video` | Renders a project/composition → mp4/webm/mov/gif/png-sequence |
 | `snapshot_frames` | Captures PNG frames for visual QA |
-| `tts_generate` | Reads a UTF-8 text file from `assets/` and generates a WAV asset via the configured OpenAI-compatible TTS-API |
+| `tts_generate` | Reads a UTF-8 text file from `assets/` and generates a WAV asset via the configured OpenAI-compatible TTS-API (`voice` per call optional) |
+| `tts_upload_voice` | Voice cloning: uploads a reference audio sample from `assets/` and registers it as a reusable `voice` (consent required by the upstream API) |
+| `list_voices` | Lists available voices (default + registered clones) |
+| `share_asset` | Copies an asset into `renders/` with an unguessable name and returns the token-free public download URL |
 | `whisperx_transcribe` | Transcribes an audio file from `assets/` with local CPU WhisperX into a timed JSON transcript |
 | `create_project` | Scaffolds a new project from an example |
 | `write_project_file` | Writes/creates a file inside a project (HTML, CSS, SVG, JSON, base64 binaries) |
@@ -37,7 +40,10 @@ status survives restarts; background job concurrency is capped by `HF_JOB_CONCUR
 
 ### Audio generation and transcription
 
-- **`tts_generate`:** Reads UTF-8 text from `<project>/assets/...` and calls a configured OpenAI-compatible TTS endpoint (`/v1/audio/speech`). Generates a `.wav` file saved directly next to the input file in `assets/`.
+- **`tts_generate`:** Reads UTF-8 text from `<project>/assets/...` and calls a configured OpenAI-compatible TTS endpoint (`/v1/audio/speech`). Generates a `.wav` file saved directly next to the input file in `assets/`. An optional per-call `voice` parameter overrides the server default (`TTS_API_VOICE`) — e.g. a cloned voice.
+- **`tts_upload_voice` (voice cloning):** Uploads an audio sample from `<project>/assets/...` as a reference to the TTS voices endpoint (`POST /v1/audio/voices`, multipart) and registers it under a `name` that can then be used as `voice` in `tts_generate`. The upstream API **requires a `consent` statement** — only clone voices you are authorized to use (your own, or with the speaker's explicit permission). Confirm registration with `list_voices`. Sample size is capped by `TTS_API_MAX_SAMPLE_BYTES` (default 25 MB).
+- **`list_voices`:** Lists the available voices (`default` + registered clones) — use it to pick the `voice` for `tts_generate`.
+- **`share_asset`:** Copies a file from `assets/` into the project's `renders/` folder under an unguessable random name and returns the token-free public download URL (when `PUBLIC_BASE_URL` is set). Use this whenever a user needs to *click* a link to a file — browsers cannot send `Authorization` headers, and only `renders/**` is served publicly.
 - **`whisperx_transcribe`:** Runs WhisperX locally on CPU against an audio file under `<project>/assets/...`. Saves a timed JSON transcript with word- and segment-level timestamps next to the original asset. Models are downloaded on first use and cached persistently (`WHISPERX_MODEL_CACHE_DIR`).
 
 ### Renders get unguessable filenames

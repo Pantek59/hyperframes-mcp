@@ -36,6 +36,8 @@ import { handleFiles, parsePublicPrefixes } from "./files.js";
 import { isAuthorized, authEnabled } from "./auth.js";
 import { createTtsApiRunner } from "./tts-api.js";
 import { createWhisperXRunner } from "./whisperx.js";
+import { createTtsUploadVoiceRunner, listVoices } from "./tts-voices.js";
+import { shareAssetToRenders } from "./share.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
 const HF_CLI =
@@ -62,6 +64,7 @@ const queue = new JobQueue({
 });
 queue.registerRunner("tts_generate", createTtsApiRunner());
 queue.registerRunner("whisperx_transcribe", createWhisperXRunner());
+queue.registerRunner("tts_upload_voice", createTtsUploadVoiceRunner());
 
 // ── CLI runner ───────────────────────────────────────────────────────────────
 function runHF(args, timeoutMs = 600000) {
@@ -342,25 +345,148 @@ function buildServer() {
     {
       description:
         "Lee un archivo UTF-8 de assets/ y genera un WAV mediante el endpoint TTS-API configurado (/v1/audio/speech). " +
-        "El trabajo se encola en la cola compartida; consulta get_job / wait_job para obtener la ruta del resultado.",
+        "Opcionalmente usa una `voice` específica para esta llamada — p. ej. una voz clonada registrada con " +
+        "tts_upload_voice (confirma los nombres con list_voices). El trabajo se encola en la cola compartida; " +
+        "consulta get_job / wait_job para obtener la ruta del resultado.",
       inputSchema: {
         project: z.string().describe("Nombre del proyecto"),
         filename: z.string().describe("Archivo de texto relativo a assets/, por ejemplo narration/script.txt"),
+        voice: z
+          .string()
+          .max(200)
+          .optional()
+          .describe("Voz para esta llamada (ej. nombre de una voz clonada). Def: TTS_API_VOICE del servidor."),
         wait: z.boolean().optional().describe("true = esperar el resultado. Def false = encolar."),
         timeout_ms: z.number().int().positive().max(3600000).optional().describe("Timeout del job en ms."),
       },
     },
-    async ({ project, filename, wait, timeout_ms }) => {
+    async ({ project, filename, voice, wait, timeout_ms }) => {
       const dir = await resolveProject(project);
       const job = queue.enqueue({
         kind: "tts_generate",
         project: rel(dir),
-        params: { filename },
+        params: { filename, voice: voice || undefined },
         timeoutMs: timeout_ms ?? TTS_API_TIMEOUT_MS,
       });
       if (!wait) return ok(jobSummary(job, "Encolado. Consulta con get_job / wait_job."));
       const done = await queue.waitFor(job.id, Math.min(timeout_ms || WAIT_MAX_MS, WAIT_MAX_MS));
       return done && done.status === "succeeded" ? ok(jobDetail(done)) : fail(jobDetail(done || job));
+    }
+  );
+
+  server.registerTool(
+    "tts_upload_voice",
+    {
+      description:
+        "Clona una voz: sube una muestra de audio de assets/ al endpoint de voces del TTS-API " +
+        "(/v1/audio/voices, multipart) para registrarla como `voice` reutilizable en tts_generate. " +
+        "Ética y legalidad: SOLO muestras cuya voz está autorizada a clonar (es la tuya o tienes permiso explícito); " +
+        "el endpoint exige una declaración de consent. El trabajo se encola; confirma el registro con list_voices. " +
+        "Sin artifacts; el nombre resultante es el `name` indicado.",
+      inputSchema: {
+        project: z.string().describe("Nombre del proyecto que contiene la muestra en assets/"),
+        filename: z
+          .string()
+          .describe("Archivo de audio relativo a assets/, por ejemplo narration/sample.mp3 (mp3/wav/ogg/flac/…)"),
+        name: z
+          .string()
+          .regex(/^[A-Za-z0-9._-]{1,64}$/)
+          .describe("Nombre de la voz en el registro (1–64 caracteres, [A-Za-z0-9._-]); usable luego como `voice`"),
+        consent: z
+          .string()
+          .min(1)
+          .max(500)
+          .describe(
+            'Declaración de consentimiento exigida por la API de clonación, p. ej. ' +
+            '"I confirm I am the speaker in this sample or have their explicit permission to clone this voice."'
+          ),
+        ref_text: z
+          .string()
+          .optional()
+          .describe("Transcripción del texto hablado en la muestra (mejora la calidad del clon)"),
+        speaker_description: z
+          .string()
+          .optional()
+          .describe("Descripción libre de la voz/locutor (p. ej. 'hombre adulto, tono calmado')"),
+        wait: z.boolean().optional().describe("true = esperar el resultado. Def false = encolar."),
+        timeout_ms: z.number().int().positive().max(3600000).optional().describe("Timeout del job en ms."),
+      },
+    },
+    async ({ project, filename, name, consent, ref_text, speaker_description, wait, timeout_ms }) => {
+      const dir = await resolveProject(project);
+      const job = queue.enqueue({
+        kind: "tts_upload_voice",
+        project: rel(dir),
+        params: { filename, name, consent, refText: ref_text, speakerDescription: speaker_description },
+        timeoutMs: timeout_ms ?? TTS_API_TIMEOUT_MS,
+      });
+      if (!wait) return ok(jobSummary(job, `Encolado. Consulta con get_job / wait_job o confirma con list_voices (${name}).`));
+      const done = await queue.waitFor(job.id, Math.min(timeout_ms || WAIT_MAX_MS, WAIT_MAX_MS));
+      return done && done.status === "succeeded" ? ok(jobDetail(done)) : fail(jobDetail(done || job));
+    }
+  );
+
+  server.registerTool(
+    "list_voices",
+    {
+      description:
+        "Lista las voces disponibles en el TTS-API (/v1/audio/voices): la voz por defecto y las voces " +
+        "clonadas registradas. úsala para elegir el parámetro `voice` de tts_generate.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const registry = await listVoices();
+        return ok(JSON.stringify(registry, null, 2));
+      } catch (e) {
+        return fail(String(e.message || e));
+      }
+    }
+  );
+
+  server.registerTool(
+    "share_asset",
+    {
+      description:
+        "Publica un archivo de assets/ en la carpeta renders/ del proyecto con un nombre no adivinable y " +
+        "devuelve una URL pública de descarga (token-free, cuando PUBLIC_BASE_URL está configurado). " +
+        "úsala cuando el usuario necesita un enlace descargable de un asset (sin auth): el archivo copiado " +
+        "queda protegido solo por el tramo aleatorio de su nombre.",
+      inputSchema: {
+        project: z.string().describe("Nombre del proyecto"),
+        filename: z.string().describe("Archivo relativo a assets/, p. ej. narration/voice.wav"),
+        name: z
+          .string()
+          .optional()
+          .describe("Nombre legible para el archivo compartido (se sanitiza; def: el nombre original)"),
+      },
+    },
+    async ({ project, filename, name }) => {
+      const dir = await resolveProject(project);
+      try {
+        const shared = await shareAssetToRenders({
+          workspace: WORKSPACE,
+          projectDir: dir,
+          filename,
+          name,
+        });
+        return ok(
+          JSON.stringify(
+            {
+              project: rel(dir),
+              file: shared.path,
+              url: shared.url,
+              note: shared.url
+                ? "URL pública; pásala al usuario como enlace markdown."
+                : "PUBLIC_BASE_URL no está configurado: la ruta /files/ requiere Authorization Bearer.",
+            },
+            null,
+            2
+          )
+        );
+      } catch (e) {
+        return fail(String(e.message || e));
+      }
     }
   );
 
@@ -584,6 +710,9 @@ async function startHttp() {
               "render_video",
               "snapshot_frames",
               "tts_generate",
+              "tts_upload_voice",
+              "list_voices",
+              "share_asset",
               "whisperx_transcribe",
               "create_project",
               "write_project_file",

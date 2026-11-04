@@ -34,7 +34,7 @@ export function randomizeOutputEnabled() {
   return !/^(false|0|no|off)$/i.test(String(v).trim());
 }
 
-function sanitizeBaseName(output) {
+export function sanitizeBaseName(output) {
   const raw = String(output ?? "").trim();
   if (!raw) return "";
   const base = path
