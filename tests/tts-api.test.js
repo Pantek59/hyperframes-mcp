@@ -213,6 +213,60 @@ test("per-call voice param overrides the configured voice", async (t) => {
   );
 });
 
+test("eviction self-heal: re-register from the voice store then retry once", async (t) => {
+  const wav = makeWav();
+  let requests = 0;
+  let voiceRegistrations = 0;
+  let failNext = true;
+  const service = await startService(async (request, response) => {
+    requests += 1;
+    if (request.url === "/v1/audio/voices") {
+      voiceRegistrations += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end("{}");
+    }
+    if (failNext) {
+      failNext = false;
+      response.writeHead(400, { "content-type": "application/json" });
+      return response.end("{}");
+    }
+    response.writeHead(200, { "content-type": "audio/wav" });
+    response.end(wav);
+  });
+  t.after(service.close);
+  const { workspace, assetsDir } = await makeInput(t);
+  const reRegisterCalls = [];
+  const runner = createTtsApiRunner({
+    env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl },
+    reRegister: async (name, signal) => {
+      reRegisterCalls.push(name);
+      assert.ok(signal instanceof AbortSignal);
+      failNext = false; // upstream accepts the clone again
+      return true;
+    },
+  });
+
+  const result = await runner(
+    { ...job("heal"), params: { ...job("heal").params, voice: "cloned-narrator" } },
+    { workspace, signal: new AbortController().signal }
+  );
+  assert.deepEqual(result.warnings, ['re-registered cloned voice "cloned-narrator" from the voice store after upstream loss']);
+  assert.deepEqual(reRegisterCalls, ["cloned-narrator"]);
+  assert.equal(requests, 2); // speech 400 → speech retry (the test hook fakes registration)
+  assert.deepEqual(result.artifacts, ["assets/narration/script.heal.wav"]);
+
+  // without the hook the original behavior is preserved (single attempt)
+  failNext = true;
+  await assert.rejects(
+    () =>
+      createTtsApiRunner({ env: { ...BASE_ENV, TTS_API_BASE_URL: service.baseUrl } })(
+        { ...job("plain"), params: { ...job("plain").params, voice: "cloned-narrator" } },
+        { workspace, signal: new AbortController().signal }
+      ),
+    /HTTP 400/
+  );
+});
+
 test("aborts an in-flight HTTP request when the shared job signal is canceled", async (t) => {
   let accepted;
   const requestStarted = new Promise((resolve) => { accepted = resolve; });

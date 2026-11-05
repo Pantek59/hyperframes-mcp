@@ -36,13 +36,19 @@ import { handleFiles, parsePublicPrefixes } from "./files.js";
 import { isAuthorized, authEnabled } from "./auth.js";
 import { createTtsApiRunner } from "./tts-api.js";
 import { createWhisperXRunner } from "./whisperx.js";
-import { createTtsUploadVoiceRunner, listVoices } from "./tts-voices.js";
+import {
+  createTtsUploadVoiceRunner,
+  listVoices,
+  deleteVoice,
+  reRegisterVoice,
+} from "./tts-voices.js";
 import { shareAssetToRenders } from "./share.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
 const HF_CLI =
   process.env.HF_CLI || path.join(HF_ROOT, "packages/cli/bin/hyperframes.mjs");
 const WORKSPACE = path.resolve(process.env.HF_WORKSPACE || "/data/projects");
+const VOICES_DIR = path.resolve(process.env.HF_VOICES_DIR || "/data/voices");
 const TRANSPORT = (process.env.MCP_TRANSPORT || "stdio").toLowerCase();
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const NODE = process.execPath;
@@ -62,9 +68,14 @@ const queue = new JobQueue({
   workspace: WORKSPACE,
   defaultTimeoutMs: RENDER_TIMEOUT_MS,
 });
-queue.registerRunner("tts_generate", createTtsApiRunner());
+queue.registerRunner(
+  "tts_generate",
+  createTtsApiRunner({
+    reRegister: (name, signal) => reRegisterVoice({ voicesDir: VOICES_DIR }, name, signal),
+  })
+);
 queue.registerRunner("whisperx_transcribe", createWhisperXRunner());
-queue.registerRunner("tts_upload_voice", createTtsUploadVoiceRunner());
+queue.registerRunner("tts_upload_voice", createTtsUploadVoiceRunner({ voicesDir: VOICES_DIR }));
 
 // ── CLI runner ───────────────────────────────────────────────────────────────
 function runHF(args, timeoutMs = 600000) {
@@ -383,9 +394,11 @@ function buildServer() {
       description:
         "Clona una voz: sube una muestra de audio de assets/ al endpoint de voces del TTS-API " +
         "(/v1/audio/voices, multipart) para registrarla como `voice` reutilizable en tts_generate. " +
-        "Ética y legalidad: SOLO muestras cuya voz está autorizada a clonar (es la tuya o tienes permiso explícito); " +
-        "el endpoint exige una declaración de consent. El trabajo se encola; confirma el registro con list_voices. " +
-        "Sin artifacts; el nombre resultante es el `name` indicado.",
+        "La muestra y sus metadatos se guardan además en el almacén GLOBAL de voces del servidor " +
+        "(HF_VOICES_DIR, independiente del proyecto): sobrevive a evicciones/reinicios de upstream y se " +
+        "re-registra automáticamente si hace falta. Ética y legalidad: SOLO muestras cuya voz está " +
+        "autorizada a clonar (es la tuya o tienes permiso explícito); el endpoint exige una declaración de " +
+        "consent. El trabajo se encola; confirma el registro con list_voices. Sin artifacts.",
       inputSchema: {
         project: z.string().describe("Nombre del proyecto que contiene la muestra en assets/"),
         filename: z
@@ -433,14 +446,38 @@ function buildServer() {
     "list_voices",
     {
       description:
-        "Lista las voces disponibles en el TTS-API (/v1/audio/voices): la voz por defecto y las voces " +
-        "clonadas registradas. úsala para elegir el parámetro `voice` de tts_generate.",
+        "Lista las voces disponibles en el TTS-API (/v1/audio/voices) más las voces clonadas en el almacén " +
+        "global del servidor (independiente de proyectos). Cada clon lleva `availableUpstream` (evicted = " +
+        "falso; se re-registra automáticamente en tts_generate) — úsala para elegir el parámetro `voice`.",
       inputSchema: {},
     },
     async () => {
       try {
-        const registry = await listVoices();
+        const registry = await listVoices({ voicesDir: VOICES_DIR });
         return ok(JSON.stringify(registry, null, 2));
+      } catch (e) {
+        return fail(String(e.message || e));
+      }
+    }
+  );
+
+  server.registerTool(
+    "tts_delete_voice",
+    {
+      description:
+        "Elimina una voz clonada permanentemente: DELETE upstream en /v1/audio/voices/{name} y limpieza del " +
+        "almacén local (muestra + registro). Irreversible. 'default' (la voz integrada) no se puede borrar.",
+      inputSchema: {
+        name: z
+          .string()
+          .regex(/^[A-Za-z0-9._-]{1,64}$/)
+          .describe("Nombre exacto de la voz clonada (ver list_voices)"),
+      },
+    },
+    async ({ name }) => {
+      try {
+        const result = await deleteVoice({ voicesDir: VOICES_DIR }, name);
+        return ok(JSON.stringify(result, null, 2));
       } catch (e) {
         return fail(String(e.message || e));
       }
@@ -715,6 +752,7 @@ async function startHttp() {
               "tts_generate",
               "tts_upload_voice",
               "list_voices",
+              "tts_delete_voice",
               "share_asset",
               "whisperx_transcribe",
               "create_project",

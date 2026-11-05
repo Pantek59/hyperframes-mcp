@@ -139,7 +139,7 @@ function validateWav(buffer, contentType) {
   return buffer;
 }
 
-export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
+export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.fetch, reRegister = null } = {}) {
   return async (job, { workspace, signal }) => {
     const config = getTtsApiConfig(env);
     const endpoint = speechEndpoint(config.baseUrl);
@@ -157,18 +157,35 @@ export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.f
 
     const headers = { "content-type": "application/json", accept: "audio/wav" };
     if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
-    const response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: config.model,
-        input: text,
-        voice: voice,
-        response_format: "wav",
-      }),
-      signal,
-      redirect: "error",
-    });
+    const speak = () =>
+      fetchImpl(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: config.model,
+          input: text,
+          voice: voice,
+          response_format: "wav",
+        }),
+        signal,
+        redirect: "error",
+      });
+    let response = await speak();
+    const warnings = [];
+    if (!response.ok && reRegister && (response.status === 400 || response.status === 404)) {
+      // A stored clone whose upstream encoding was evicted (or lost via an
+      // upstream restart) — re-registering from the voice store and retrying
+      // once. Any failure here falls back to the original HTTP error below.
+      await response.body?.cancel().catch(() => {});
+      try {
+        if (await reRegister(voice, signal)) {
+          warnings.push(`re-registered cloned voice "${voice}" from the voice store after upstream loss`);
+          response = await speak();
+        }
+      } catch {
+        /* keep the first response and surface its status */
+      }
+    }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
       throw new Error(`TTS API returned HTTP ${response.status}`);
@@ -227,6 +244,7 @@ export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.f
     }
     return {
       artifacts: [output.artifactPath],
+      warnings,
       cleanup: () => cleanupPublishedFile(output.path, output.parent, identity),
     };
   };

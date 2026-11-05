@@ -15,9 +15,10 @@ surface of the Studio.
 | `lint_project` | Runs the HyperFrames linter (a11y/layout/motion) |
 | `render_video` | Renders a project/composition → mp4/webm/mov/gif/png-sequence |
 | `snapshot_frames` | Captures PNG frames for visual QA |
-| `tts_generate` | Reads a UTF-8 text file from `assets/` and generates a WAV asset via the configured OpenAI-compatible TTS-API (`voice` per call optional) |
-| `tts_upload_voice` | Voice cloning: uploads a reference audio sample from `assets/` and registers it as a reusable `voice` (consent required by the upstream API) |
-| `list_voices` | Lists available voices (default + registered clones) |
+| `tts_generate` | Reads a UTF-8 text file from `assets/` and generates a WAV asset via the configured OpenAI-compatible TTS-API (`voice` per call optional; evicted clones re-register automatically) |
+| `tts_upload_voice` | Voice cloning: uploads a reference audio sample from `assets/` and registers it as a reusable `voice` (consent required by the upstream API). The sample is stored **globally** in `HF_VOICES_DIR`, independent of projects |
+| `list_voices` | Lists available voices (default + clones, with upstream-availability flags) |
+| `tts_delete_voice` | Permanently removes a cloned voice (upstream + global store); `default` is protected |
 | `share_asset` | Copies an asset into `renders/` with an unguessable name and returns the token-free public download URL |
 | `whisperx_transcribe` | Transcribes an audio file from `assets/` with local CPU WhisperX into a timed JSON transcript |
 | `create_project` | Scaffolds a new project from an example |
@@ -162,6 +163,7 @@ provider variants) lives in [`docs/traefik.md`](docs/traefik.md).
 | `MCP_AUTH_TOKEN` | _(empty)_ | If set, require `Authorization: Bearer *** (CSV = rotation). `/health` stays public |
 | `HF_WORKSPACE` | `/data/projects` | Where projects live |
 | `HF_JOBS_DIR` | `/data/jobs` | Where job records are persisted |
+| `HF_VOICES_DIR` | `/data/voices` | Global voice store for clones (`registry.json` + `samples/`) — outside the workspace, never served by `/files/` |
 | `HF_JOB_CONCURRENCY` | `1` | Max renders/snapshots running at once |
 | `HF_JOB_TAIL_LINES` | `200` | Log lines kept per job |
 | `HF_WAIT_MAX_MS` | `600000` | Cap for `wait:true` / `wait_job` |

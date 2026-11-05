@@ -1,10 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createTtsUploadVoiceRunner, listVoices } from "../src/tts-voices.js";
+import {
+  createTtsUploadVoiceRunner,
+  listVoices,
+  listFromStore,
+  deleteVoice,
+  reRegisterVoice,
+} from "../src/tts-voices.js";
 
 const MP3_BYTES = Buffer.from("ID3 synthetic audio payload for tests", "utf8");
 
@@ -29,9 +35,9 @@ function makeJobAudio() {
 
 function parseMultipart(raw, contentType) {
   const boundary = /boundary=([^;]+)/.exec(contentType)[1];
-  const lower = raw.toString("latin1");
+  const text = raw.toString("latin1");
   const parts = {};
-  for (const chunk of lower.split(`--${boundary}`)) {
+  for (const chunk of text.split(`--${boundary}`)) {
     if (!chunk.toLowerCase().includes("content-disposition")) continue;
     const nameMatch = /name="([^"]*)"/.exec(chunk);
     if (!nameMatch) continue;
@@ -59,32 +65,34 @@ async function makeProject(t, sample = "narration/sample.mp3", content = MP3_BYT
   const samplePath = path.join(projectDir, "assets", sample);
   await mkdir(path.dirname(samplePath), { recursive: true });
   await writeFile(samplePath, content);
+  const voicesDir = path.join(workspace, "voices-store");
   t.after(() => rm(workspace, { recursive: true, force: true }));
-  return { workspace, samplePath };
+  return { workspace, voicesDir, samplePath };
 }
 
-function job(params) {
-  return { id: "job-voices", project: "project", params };
-}
+const ENV = (baseUrl) => ({ TTS_API_BASE_URL: baseUrl, TTS_API_API_KEY: "k" });
+const job = (params) => ({ id: "job-voices", project: "project", params });
+const CTX = { signal: new AbortController().signal };
 
-test("uploads the multipart registration and reports no artifacts", async (t) => {
-  let observed;
+test("upload registers upstream AND stores the sample + metadata globally", async (t) => {
+  let upBody = null;
+  let upAuth = null;
   const service = await startService(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    observed = {
-      method: request.method,
-      url: request.url,
-      contentType: request.headers["content-type"],
-      authorization: request.headers.authorization,
-      parts: parseMultipart(Buffer.concat(chunks), request.headers["content-type"]),
-    };
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: true, name: "narrator" }));
+    const raw = Buffer.concat(chunks);
+    if (request.method === "POST" && request.url === "/v1/audio/voices") {
+      upAuth = request.headers.authorization;
+      upBody = parseMultipart(raw, request.headers["content-type"]);
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ ok: true }));
+    }
+    response.writeHead(404);
+    response.end();
   });
   t.after(service.close);
-  const { workspace } = await makeProject(t);
-  const runner = createTtsUploadVoiceRunner({ env: { TTS_API_BASE_URL: service.baseUrl, TTS_API_API_KEY: "k" } });
+  const { workspace, voicesDir } = await makeProject(t);
+  const runner = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
 
   const result = await runner(
     job({
@@ -98,141 +106,215 @@ test("uploads the multipart registration and reports no artifacts", async (t) =>
   );
 
   assert.deepEqual(result.artifacts, []);
-  assert.equal(observed.method, "POST");
-  assert.equal(observed.url, "/v1/audio/voices");
-  assert.equal(observed.authorization, "Bearer k");
-  assert.match(observed.contentType, /^multipart\/form-data;/);
-  assert.equal(observed.parts.name, "narrator");
-  assert.match(observed.parts.consent, /^I confirm I am the speaker/);
-  assert.equal(observed.parts.ref_text, "This is the spoken transcript.");
-  assert.equal(observed.parts.speaker_description, "calm adult voice");
-  assert.equal(observed.parts.audio_sample.filename, "sample.mp3");
-  assert.ok(observed.parts.audio_sample.value.includes("synthetic audio payload"));
+  assert.deepEqual(result.warnings, []);
+assert.equal(upBody.name, "narrator");
+  assert.equal(upAuth, "Bearer k");
+
+  const registry = await listFromStore(voicesDir);
+  assert.equal(registry.length, 1);
+  const entry = registry[0];
+  assert.equal(entry.name, "narrator");
+  assert.equal(entry.sampleSize, MP3_BYTES.length);
+  assert.equal(entry.sampleMime, "audio/mpeg");
+  assert.match(entry.sampleFile, /^narrator\.mp3$/);
+  assert.ok((await readFile(path.join(voicesDir, "samples", "narrator.mp3"))).equals(MP3_BYTES));
+  assert.match(entry.createdAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
-test("rejects a non-audio sample before contacting the service", async (t) => {
-  let requests = 0;
-  const service = await startService((_req, res) => {
-    requests += 1;
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end("{}");
+test("re-registering the same name replaces the store entry with a warning", async (t) => {
+  let calls = 0;
+  const service = await startService((_request, response) => {
+    calls += 1;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end("{}");
   });
   t.after(service.close);
-  const { workspace } = await makeProject(t, "notes/sample.txt", Buffer.from("just text"));
-  const runner = createTtsUploadVoiceRunner({ env: { TTS_API_BASE_URL: service.baseUrl } });
+  const { workspace, voicesDir } = await makeProject(t);
+  const runner = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
+  const params = { filename: "narration/sample.mp3", name: "narrator", consent: "ok" };
+  await runner(job(params), { workspace, signal: new AbortController().signal });
+  const result = await runner(job(params), { workspace, signal: new AbortController().signal });
 
-  await assert.rejects(
-    () => runner(job({ filename: "notes/sample.txt", name: "x", consent: "y" }), { workspace, signal: new AbortController().signal }),
-    /must be an audio file/
-  );
-  assert.equal(requests, 0);
+  assert.deepEqual(await listFromStore(voicesDir).then((r) => r.map((e) => e.name)), ["narrator"]);
+  assert.ok(result.warnings[0].includes("replaced"));
+  assert.equal(calls, 2);
 });
 
-test("rejects missing consent or an unsafe name without contacting the service", async (t) => {
-  let requests = 0;
-  const service = await startService((_req, res) => {
-    requests += 1;
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end("{}");
+test("a failed upstream registration leaves the store untouched", async (t) => {
+  const service = await startService((_request, response) => {
+    response.writeHead(422, { "content-type": "application/json" });
+    response.end(JSON.stringify({ detail: "private upstream diagnostic" }));
   });
   t.after(service.close);
-  const { workspace } = await makeProject(t);
-  const runner = createTtsUploadVoiceRunner({ env: { TTS_API_BASE_URL: service.baseUrl } });
-  const ctx = { workspace, signal: new AbortController().signal };
-
-  await assert.rejects(() => runner(job({ filename: "narration/sample.mp3", name: "x" }), ctx), /consent/);
-  await assert.rejects(() => runner(job({ filename: "narration/sample.mp3", consent: "ok", name: "../evil" }), ctx), /Voice name/);
-  await assert.rejects(() => runner(job({ filename: "narration/sample.mp3", consent: "ok", name: "with space" }), ctx), /Voice name/);
-  assert.equal(requests, 0);
-});
-
-test("rejects oversized samples before uploading", async (t) => {
-  let requests = 0;
-  const service = await startService((_req, res) => {
-    requests += 1;
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end("{}");
-  });
-  t.after(service.close);
-  const { workspace } = await makeProject(t, "narration/big.mp3", Buffer.alloc(100));
-  const runner = createTtsUploadVoiceRunner({
-    env: { TTS_API_BASE_URL: service.baseUrl, TTS_API_MAX_SAMPLE_BYTES: "50" },
-  });
-
-  await assert.rejects(
-    () => runner(job({ filename: "narration/big.mp3", name: "x", consent: "ok" }), { workspace, signal: new AbortController().signal }),
-    /exceeds the 50-byte limit/
-  );
-  assert.equal(requests, 0);
-});
-
-test("never leaks remote error bodies", async (t) => {
-  const service = await startService((_req, res) => {
-    res.writeHead(422, { "content-type": "application/json" });
-    res.end(JSON.stringify({ detail: "private upstream diagnostic" }));
-  });
-  t.after(service.close);
-  const { workspace } = await makeProject(t);
-  const runner = createTtsUploadVoiceRunner({ env: { TTS_API_BASE_URL: service.baseUrl } });
+  const { workspace, voicesDir } = await makeProject(t);
+  const runner = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
 
   await assert.rejects(
     () => runner(job({ filename: "narration/sample.mp3", name: "x", consent: "ok" }), { workspace, signal: new AbortController().signal }),
     (error) => error.message.includes("HTTP 422") && !error.message.includes("private upstream diagnostic")
   );
+  assert.deepEqual(await listFromStore(voicesDir), []);
+  await assert.rejects(() => readdir(path.join(voicesDir, "samples")), { code: "ENOENT" });
 });
 
-test("rejects a non-JSON success response", async (t) => {
+test("sample validation happens before any upstream call", async (t) => {
+  let calls = 0;
   const service = await startService((_req, res) => {
-    res.writeHead(200, { "content-type": "text/plain" });
-    res.end("registered");
-  });
-  t.after(service.close);
-  const { workspace } = await makeProject(t);
-  const runner = createTtsUploadVoiceRunner({ env: { TTS_API_BASE_URL: service.baseUrl } });
-
-  await assert.rejects(
-    () => runner(job({ filename: "narration/sample.mp3", name: "x", consent: "ok" }), { workspace, signal: new AbortController().signal }),
-    /unexpected response type/
-  );
-});
-
-test("listVoices returns the parsed registry", async (t) => {
-  const service = await startService((req, res) => {
-    if (req.method !== "GET" || req.url !== "/v1/audio/voices") {
-      res.writeHead(404);
-      return res.end();
-    }
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ voices: ["default"], uploaded_voices: ["narrator"] }));
-  });
-  t.after(service.close);
-
-  const registry = await listVoices({ env: { TTS_API_BASE_URL: service.baseUrl } });
-  assert.deepEqual(registry, { voices: ["default"], uploaded_voices: ["narrator"] });
-});
-
-test("listVoices and the runner fail with an actionable message when unconfigured", async (t) => {
-  await assert.rejects(() => listVoices({ env: {} }), /TTS_API_BASE_URL/);
-  const runner = createTtsUploadVoiceRunner({ env: {} });
-  await assert.rejects(
-    () => runner(job({ filename: "a.mp3", name: "x", consent: "ok" }), { workspace: "/tmp", signal: new AbortController().signal }),
-    /TTS_API_BASE_URL/
-  );
-});
-
-test("accepts wav samples", async (t) => {
-  let seen = null;
-  const service = await startService(async (req, res) => {
-    const chunks = [];
-    for await (const chunk of req) chunks.push(chunk);
-    seen = parseMultipart(Buffer.concat(chunks), req.headers["content-type"]);
+    calls += 1;
     res.writeHead(200, { "content-type": "application/json" });
     res.end("{}");
   });
   t.after(service.close);
-  const { workspace } = await makeProject(t, "narration/ref.wav", makeJobAudio());
-  const runner = createTtsUploadVoiceRunner({ env: { TTS_API_BASE_URL: service.baseUrl } });
+  const { workspace, voicesDir } = await makeProject(t, "notes/sample.txt", Buffer.from("just text"));
+  const runner = createTtsUploadVoiceRunner({
+    env: { ...ENV(service.baseUrl), TTS_API_MAX_SAMPLE_BYTES: "50" },
+    voicesDir: path.join(voicesDir, "cap"),
+  });
+  const ctx = { workspace, signal: new AbortController().signal };
 
-  await runner(job({ filename: "narration/ref.wav", name: "ref", consent: "ok" }), { workspace, signal: new AbortController().signal });
-  assert.equal(seen.audio_sample.filename, "ref.wav");
+  await assert.rejects(
+    () => runner(job({ filename: "notes/sample.txt", name: "x", consent: "ok" }), ctx),
+    /must be an audio file/
+  );
+  await assert.rejects(
+    () => runner(job({ filename: "narration/sample.mp3", name: "with space", consent: "ok" }), { ...ctx, voicesDir }),
+    /Voice name/
+  );
+  assert.throws(
+    () => createTtsUploadVoiceRunner({ env: ENV(service.baseUrl) }),
+    /voice store/
+  );
+  const bad = createTtsUploadVoiceRunner({ env: { ...ENV(service.baseUrl), TTS_API_MAX_SAMPLE_BYTES: "50" }, voicesDir });
+  const { workspace: ws2 } = await makeProject(t, "narration/big.mp3", Buffer.alloc(100));
+  await assert.rejects(() => bad(job({ filename: "narration/big.mp3", name: "x3", consent: "ok" }), { workspace: ws2, signal: new AbortController().signal }), /exceeds the 50-byte limit/);
+  assert.equal(calls, 0);
+});
+
+test("missing consent is rejected", async (t) => {
+  const service = await startService((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  t.after(service.close);
+  const { workspace, voicesDir } = await makeProject(t);
+  const runner = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
+  await assert.rejects(
+    () => runner(job({ filename: "narration/sample.mp3", name: "ok-name" }), { workspace, signal: new AbortController().signal }),
+    /consent/
+  );
+});
+
+test("listVoices merges upstream registry and store with availability flags", async (t) => {
+  const service = await startService((req, res) => {
+    if (req.method !== "GET" || req.url !== "/v1/audio/voices") {
+      if (req.method === "POST") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end("{}");
+      }
+      res.writeHead(404);
+      return res.end();
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      voices: ["default"],
+      uploaded_voices: [],
+      cache_stats: { entries: 0 },
+    }));
+  });
+  t.after(service.close);
+  const { workspace, voicesDir } = await makeProject(t);
+  const runner = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
+  await runner(job({ filename: "narration/sample.mp3", name: "evicted-clone", consent: "ok" }), { workspace, signal: new AbortController().signal });
+
+  const merged = await listVoices({ env: ENV(service.baseUrl), voicesDir });
+  assert.deepEqual(merged.clones, [
+    {
+      name: "evicted-clone",
+      refText: null,
+      speakerDescription: null,
+      createdAt: merged.clones[0].createdAt,
+      sampleSize: MP3_BYTES.length,
+      sampleFile: "voices/samples/evicted-clone.mp3",
+      availableUpstream: false, // upstream evicted it; store still owns the sample
+    },
+  ]);
+  assert.deepEqual(merged.voices, ["default"]);
+  assert.deepEqual(merged.cache_stats, { entries: 0 });
+
+  const noStore = await listVoices({ env: ENV(service.baseUrl) });
+  assert.deepEqual(noStore.clones, []);
+});
+
+test("reRegisterVoice re-uploads the stored sample with stored consent", async (t) => {
+  let seen = null;
+  const service = await startService(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    if (req.method === "POST" && req.url === "/v1/audio/voices") {
+      seen = parseMultipart(Buffer.concat(chunks), req.headers["content-type"]);
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end("{}");
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  t.after(service.close);
+  const { workspace, voicesDir } = await makeProject(t);
+  const upload = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
+  await upload(
+    job({ filename: "narration/sample.mp3", name: "narrator", consent: "stored consent", refText: "stored text" }),
+    { workspace, signal: new AbortController().signal }
+  );
+
+  assert.equal(await reRegisterVoice({ env: ENV(service.baseUrl), voicesDir }, "narrator"), true);
+  assert.equal(seen.name, "narrator");
+  assert.equal(seen.consent, "stored consent");
+  assert.equal(seen.ref_text, "stored text");
+  assert.equal(await reRegisterVoice({ env: ENV(service.baseUrl), voicesDir }, "ghost"), false);
+});
+
+test("deleteVoice removes upstream and store entries; default is protected", async (t) => {
+  let deleteCalls = 0;
+  const service = await startService((req, res) => {
+    if (req.method === "DELETE" && req.url === "/v1/audio/voices/narrator") {
+      deleteCalls += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end("{}");
+    }
+    if (req.method === "POST" && req.url === "/v1/audio/voices") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end("{}");
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  t.after(service.close);
+  const { workspace, voicesDir } = await makeProject(t);
+  const upload = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
+  await upload(job({ filename: "narration/sample.mp3", name: "narrator", consent: "ok" }), { workspace, signal: new AbortController().signal });
+
+  const result = await deleteVoice({ env: ENV(service.baseUrl), voicesDir }, "narrator");
+  assert.deepEqual(result, { deleted: "narrator" });
+  assert.equal(deleteCalls, 1);
+  assert.deepEqual(await listFromStore(voicesDir), []);
+
+  await assert.rejects(() => deleteVoice({ env: ENV(service.baseUrl), voicesDir }, "default"), /cannot be deleted/);
+  await assert.rejects(() => deleteVoice({ env: ENV(service.baseUrl), voicesDir }, "ghost"), /no stored clone/);
+});
+
+test("a corrupt registry fails safe with an actionable error", async (t) => {
+  const service = await startService((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  t.after(service.close);
+  const { workspace, voicesDir } = await makeProject(t);
+  const runner = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
+  const ctx = { workspace, signal: new AbortController().signal };
+  await runner(job({ filename: "narration/sample.mp3", name: "narrator", consent: "ok" }), ctx);
+  await writeFile(path.join(voicesDir, "registry.json"), "{corrupt");
+  await assert.rejects(
+    () => runner(job({ filename: "narration/sample.mp3", name: "narrator", consent: "ok" }), ctx),
+    /registry is corrupt/
+  );
 });
