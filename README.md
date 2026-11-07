@@ -16,8 +16,8 @@ surface of the Studio.
 | `render_video` | Renders a project/composition → mp4/webm/mov/gif/png-sequence |
 | `snapshot_frames` | Captures PNG frames for visual QA |
 | `tts_generate` | Reads a UTF-8 text file from `assets/` and generates a WAV asset via the configured OpenAI-compatible TTS-API (`voice` per call optional; evicted clones re-register automatically) |
-| `tts_upload_voice` | Voice cloning: uploads a reference audio sample from `assets/` and registers it as a reusable `voice` (consent required by the upstream API). The sample is stored **globally** in `HF_VOICES_DIR`, independent of projects |
-| `list_voices` | Lists available voices (default + clones, with upstream-availability flags) |
+| `tts_upload_voice` | Voice cloning: registers a reference audio sample (from any project's `assets/`, or a file dropped directly into the global voice store root/`inbox/`) as a reusable `voice`; consent required by the upstream API. Samples + metadata live **globally** in `HF_VOICES_DIR` — never inside a project |
+| `list_voices` | Lists available voices (default + clones with upstream-availability flags, plus unregistered `inbox/` drops waiting for registration) |
 | `tts_delete_voice` | Permanently removes a cloned voice (upstream + global store); `default` is protected |
 | `share_asset` | Copies an asset into `renders/` with an unguessable name and returns the token-free public download URL |
 | `whisperx_transcribe` | Transcribes an audio file from `assets/` with local CPU WhisperX into a timed JSON transcript |

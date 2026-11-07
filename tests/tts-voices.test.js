@@ -10,6 +10,8 @@ import {
   listFromStore,
   deleteVoice,
   reRegisterVoice,
+  resolveStoreSample,
+  listInbox,
 } from "../src/tts-voices.js";
 
 const MP3_BYTES = Buffer.from("ID3 synthetic audio payload for tests", "utf8");
@@ -317,4 +319,61 @@ test("a corrupt registry fails safe with an actionable error", async (t) => {
     () => runner(job({ filename: "narration/sample.mp3", name: "narrator", consent: "ok" }), ctx),
     /registry is corrupt/
   );
+});
+
+test("store-drop flow: register a voice without any project", async (t) => {
+  let seen = null;
+  const service = await startService(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    if (req.method === "POST" && req.url === "/v1/audio/voices") {
+      seen = parseMultipart(Buffer.concat(chunks), req.headers["content-type"]);
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end("{}");
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  t.after(service.close);
+  const { voicesDir } = await makeProject(t);
+  // user drops the sample into inbox/
+  await mkdir(path.join(voicesDir, "inbox"), { recursive: true });
+  const dropped = path.join(voicesDir, "inbox", "my-voice.mp3");
+  await writeFile(dropped, MP3_BYTES);
+
+  const inboxBefore = await listInbox(voicesDir);
+  assert.deepEqual(inboxBefore.map((f) => f.file), ["inbox/my-voice.mp3"]);
+  assert.equal((await resolveStoreSample(voicesDir, "my-voice.mp3")).ext, "mp3");
+
+  const runner = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
+  const result = await runner(
+    { id: "store-drop", project: null, params: { filename: "inbox/my-voice.mp3", name: "my_voice", consent: "ok" } },
+    { workspace: path.join(path.dirname(voicesDir), "no-project-but-fine"), signal: new AbortController().signal }
+  );
+
+  assert.deepEqual(result.artifacts, []);
+  assert.equal(seen.name, "my_voice");
+  // move semantics: the inbox file is consumed and the canonical copy stored
+  await assert.rejects(() => readdir(dropped), { code: "ENOENT" });
+  assert.ok((await readFile(path.join(voicesDir, "samples", "my_voice.mp3"))).equals(MP3_BYTES));
+  assert.deepEqual(await listInbox(voicesDir), []);
+  assert.deepEqual((await listFromStore(voicesDir)).map((e) => e.name), ["my_voice"]);
+});
+
+test("resolveStoreSample is strict about managed and unsafe paths", async (t) => {
+  const { voicesDir } = await makeProject(t);
+  await mkdir(path.join(voicesDir, "inbox"), { recursive: true });
+  await mkdir(path.join(voicesDir, "samples"), { recursive: true });
+  await writeFile(path.join(voicesDir, "inbox", "ok.wav"), "x");
+  await writeFile(path.join(voicesDir, "samples", "registered.mp3"), "x");
+  await writeFile(path.join(voicesDir, "registry.json"), "[]");
+
+  assert.ok(await resolveStoreSample(voicesDir, "ok.wav"));           // root lookup for inbox file
+  assert.ok(await resolveStoreSample(voicesDir, "inbox/ok.wav"));     // explicit inbox lookup
+  assert.equal(await resolveStoreSample(voicesDir, "registered.mp3"), null); // samples/ never resolvable by that name alone? — no: samples/<file> requires the "samples/" prefix, which is rejected
+  assert.equal(await resolveStoreSample(voicesDir, "samples/registered.mp3"), null);
+  assert.equal(await resolveStoreSample(voicesDir, "registry.json"), null);
+  assert.equal(await resolveStoreSample(voicesDir, "../escape.wav"), null);
+  assert.equal(await resolveStoreSample(voicesDir, ""), null);
+  assert.equal(await resolveStoreSample(voicesDir, "notes/sample.txt"), null); // non-audio ext
 });

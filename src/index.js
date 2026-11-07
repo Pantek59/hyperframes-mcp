@@ -392,18 +392,21 @@ function buildServer() {
     "tts_upload_voice",
     {
       description:
-        "Clona una voz: sube una muestra de audio de assets/ al endpoint de voces del TTS-API " +
-        "(/v1/audio/voices, multipart) para registrarla como `voice` reutilizable en tts_generate. " +
-        "La muestra y sus metadatos se guardan además en el almacén GLOBAL de voces del servidor " +
-        "(HF_VOICES_DIR, independiente del proyecto): sobrevive a evicciones/reinicios de upstream y se " +
-        "re-registra automáticamente si hace falta. Ética y legalidad: SOLO muestras cuya voz está " +
-        "autorizada a clonar (es la tuya o tienes permiso explícito); el endpoint exige una declaración de " +
-        "consent. El trabajo se encola; confirma el registro con list_voices. Sin artifacts.",
+        "Clona una voz desde una muestra de audio: la registra en el endpoint de voces del TTS-API " +
+        "(/v1/audio/voices, multipart) como `voice` reutilizable en tts_generate y la guarda en el almacén " +
+        "GLOBAL de voces (HF_VOICES_DIR, independiente del proyecto; sobrevive a evicciones/reinicios y se " +
+        "re-registra automáticamente). Fuente de la muestra: un archivo de assets/ de un project, O un " +
+        "archivo soltado directamente en la carpeta del almacén (voices/ raíz o voices/inbox/) sin project. " +
+        "Ética y legalidad: SOLO muestras cuya voz está autorizada a clonar (es la tuya o tienes permiso " +
+        "explícito); el endpoint exige una declaración de consent. Encola el trabajo; confirma con list_voices.",
       inputSchema: {
-        project: z.string().describe("Nombre del proyecto que contiene la muestra en assets/"),
+        project: z
+          .string()
+          .optional()
+          .describe("Nombre del proyecto que contiene la muestra en assets/ (omitir si la muestra ya está en la carpeta del almacén de voces)"),
         filename: z
           .string()
-          .describe("Archivo de audio relativo a assets/, por ejemplo narration/sample.mp3 (mp3/wav/ogg/flac/…)"),
+          .describe("Muestra de audio relativa a assets/ del proyecto, o relativa a la carpeta del almacén de voces (ej. 'pantek.mp3' o 'inbox/pantek.mp3'); mp3/wav/ogg/flac/…"),
         name: z
           .string()
           .regex(/^[A-Za-z0-9._-]{1,64}$/)
@@ -429,10 +432,10 @@ function buildServer() {
       },
     },
     async ({ project, filename, name, consent, ref_text, speaker_description, wait, timeout_ms }) => {
-      const dir = await resolveProject(project);
+      const dir = project ? await resolveProject(project) : undefined;
       const job = queue.enqueue({
         kind: "tts_upload_voice",
-        project: rel(dir),
+        project: dir ? rel(dir) : null,
         params: { filename, name, consent, refText: ref_text, speakerDescription: speaker_description },
         timeoutMs: timeout_ms ?? TTS_API_TIMEOUT_MS,
       });

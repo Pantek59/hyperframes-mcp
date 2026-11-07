@@ -45,14 +45,14 @@ HyperFrames media pipeline (MCP on finrod). Follow strictly.
 
 AUDIO (hard rule)
 - ALL speech MUST come from the MCP TTS tools (HiggsAudio, bosonai/higgs-tts-3-4b). No other audio option exists.
-- NEVER use other TTS (Kokoro-82M, Piper, espeak…), never synthesize audio in code, never fabricate files. If tts_generate fails, report it — no workarounds.
+- NEVER use other TTS (Kokoro-82M, Piper, espeak…), never synthesize audio in code, never fabricate files. If tts_generate fails, report it; no workarounds.
 - Voice via list_voices: voice:"<name>" in tts_generate. New voices only via tts_upload_voice; removal via tts_delete_voice (never "default").
 
 Projects & assets
 - Verify names: list_projects, list_compositions, list_assets. Never invent them.
-- Upload binaries (PNG/JPG/MP3/WAV/fonts) via write_project_file encoding=base64; text UTF-8; paths project-relative.
+- Upload binaries via write_project_file encoding=base64; text UTF-8; project-relative paths.
 - list_assets entries contain `link`, the exact internal /files/… path (auth-gated). For a clickable public download run share_asset with that path; share its `url` markdown.
-- Compositions follow the project's AGENTS.md (data-start/data-track, paused root timeline on window.__timelines, muted video + separate audio track, deterministic only). lint_project after edits; fix before render.
+- Compositions follow the project's AGENTS.md (data-start/data-track, paused root timeline, video muted + separate audio track, deterministic only). lint_project after edits; fix before render.
 
 Jobs
 - render_video, snapshot_frames, tts_generate, whisperx_transcribe, tts_upload_voice enqueue → job_id; track via get_job/list_jobs.
@@ -60,12 +60,12 @@ Jobs
 
 TTS workflow
 - Script = UTF-8 asset (short sentences) → tts_generate. Verify long speech with whisperx_transcribe (word timestamps).
-- Clones are GLOBAL: registered once, usable in every project; evictions auto-heal on the next tts_generate (availableUpstream in list_voices shows the state).
-- Cloning: one clean speaker, 6–30 s, ≤25 MB, audio in assets/. REQUIRED name ([A-Za-z0-9._-]) + consent ("I confirm I am the speaker in this sample or have the speaker's explicit permission to clone this voice."). Only authorized voices. Confirm via list_voices.
+- Clones are GLOBAL: usable in every project; evictions auto-heal on the next tts_generate (see availableUpstream).
+- Cloning: one clean speaker, 6–30 s, ≤25 MB. Sample = in assets/ (pass project) or dropped into the store root/inbox (no project; `inbox` in list_voices shows pending drops). REQUIRED name ([A-Za-z0-9._-]) + consent ("I confirm I am the speaker in this sample or have the speaker's explicit permission to clone this voice."). Only authorized voices. Confirm via list_voices.
 
 Safety
-- Never print/transmit MCP_AUTH_TOKEN or credentials.
-- Long jobs take minutes: poll get_job; don't redo work.
+Never print/transmit MCP_AUTH_TOKEN or credentials.
+- Long jobs take minutes: poll get_job.
 ```
 
 ## 4. What users can say to the agent

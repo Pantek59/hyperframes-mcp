@@ -221,6 +221,67 @@ async function uploadUpstream({ config, fetchImpl, samplePath, sampleBytes }, { 
   await ensureJson(response, DEFAULT_MAX_RESPONSE_BYTES);
 }
 
+// ── Store-resident samples (inbox): register without any project ─────────────
+
+/**
+ * Resolve a sample that lives INSIDE the voice store (dropped by a user or an
+ * agent directly into <HF_VOICES_DIR> — accepted in the root or in inbox/).
+ * Managed paths (samples/, registry.json) are off limits. Returns
+ * { path, ext } or NULL when `filename` does not exist in the store.
+ */
+export async function resolveStoreSample(voicesDir, filename) {
+  const { root } = storeRoots(voicesDir);
+  const relName = typeof filename === "string" ? filename.trim() : "";
+  if (!relName || relName.includes("\0") || relName.includes("\\") ||
+      path.isAbsolute(relName) || path.win32.isAbsolute(relName) ||
+      relName.split("/").some((part) => !part || part === "." || part === "..")) {
+    return null;
+  }
+  const candidates = [path.join(root, relName), path.join(root, "inbox", relName)];
+  for (const candidate of candidates) {
+    const real = await fs.realpath(candidate).catch(() => null);
+    if (!real) continue;
+    const rel = path.relative(root, real);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
+    if (rel === "registry.json" || rel === "samples" || rel.startsWith("samples" + path.sep)) continue;
+    const stat = await fs.stat(real).catch(() => null);
+    if (!stat || !stat.isFile()) continue;
+    const ext = path.extname(real).toLowerCase().slice(1);
+    if (!SAMPLE_EXTS.has(ext)) continue;
+    return { path: real, ext };
+  }
+  return null;
+}
+
+/**
+ * Audio files dropped into the store (root or inbox/) that are not yet
+ * registered — surfaced by list_voices so agents can see and register them.
+ */
+export async function listInbox(voicesDir) {
+  if (!voicesDir) return [];
+  const { root } = storeRoots(voicesDir);
+  const out = [];
+  for (const [dir, display] of [[root, ""], [path.join(root, "inbox"), "inbox/"]]) {
+    let dirents = [];
+    try {
+      dirents = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const de of dirents) {
+      if (!de.isFile() || de.name.startsWith(".")) continue;
+      if (!SAMPLE_EXTS.has(path.extname(de.name).toLowerCase().slice(1))) continue;
+      if (display === "" && de.name === "registry.json") continue;
+      const st = await fs.stat(path.join(dir, de.name)).catch(() => null);
+      if (!st) continue;
+      out.push({ file: `${display}${de.name}`, size: st.size, modified: st.mtime.toISOString(), type: "audio" });
+    }
+  }
+  const seen = new Set();
+  return out.filter((f) => (seen.has(f.file) ? false : (seen.add(f.file), true)));
+}
+
+
 // ── Job runner: tts_upload_voice ─────────────────────────────────────────────
 
 export function createTtsUploadVoiceRunner({ env = process.env, voicesDir, fetchImpl = globalThis.fetch } = {}) {
@@ -237,26 +298,58 @@ export function createTtsUploadVoiceRunner({ env = process.env, voicesDir, fetch
     const refText = String(params.refText ?? "").trim().slice(0, 10_000);
     const speakerDescription = String(params.speakerDescription ?? "").trim().slice(0, 2000);
 
-    const projectDir = path.resolve(workspace, job.project || ".");
-    const input = await resolveAssetInput({ workspace, projectDir, filename: params.filename });
-    const ext = path.extname(input.path).toLowerCase().slice(1);
+    // Sample source 1: a project's assets/ (as before).
+    // Sample source 2: the voice store itself (root or inbox/) — no project needed.
+    let samplePath = null;
+    let ext = null;
+    let fromStore = false;
+    if (job.project) {
+      try {
+        const input = await resolveAssetInput({ workspace, projectDir: path.resolve(workspace, job.project), filename: params.filename });
+        samplePath = input.path;
+        ext = path.extname(input.path).toLowerCase().slice(1);
+      } catch {
+        samplePath = null; // fall through to the store lookup
+      }
+    }
+    if (!samplePath) {
+      const store = await resolveStoreSample(voicesDir, params.filename);
+      if (store) {
+        samplePath = store.path;
+        ext = store.ext;
+        fromStore = true;
+      }
+    }
+    if (!samplePath) {
+      throw new Error(
+        `Voice sample not found: give a file in a project's assets/ (with project), or drop the audio into the voice store (${path.basename(voicesDir)}/ root or inbox/) and pass the filename only`
+      );
+    }
     if (!SAMPLE_EXTS.has(ext)) {
       throw new Error(`Voice sample must be an audio file (${[...SAMPLE_EXTS].join(", ")})`);
     }
     const replaced = (await loadRegistry(voicesDir)).some((e) => e.name === name);
 
-    await uploadUpstream({ config, fetchImpl, samplePath: input.path, sampleBytes: maxSampleBytes },
+    await uploadUpstream({ config, fetchImpl, samplePath, sampleBytes: maxSampleBytes },
       { name, consent, refText, speakerDescription }, signal);
     if (signal.aborted) throw signal.reason || new Error("Job canceled");
 
-    await storeSample(voicesDir, {
+    const audio = await readBoundedFile(samplePath, maxSampleBytes);
+    const stored = await storeSample(voicesDir, {
       name,
       consent,
       refText,
       speakerDescription,
       createdAt: new Date().toISOString(),
       sampleMime: SAMPLE_MIMES[ext],
-    }, input.path, (await readBoundedFile(input.path, maxSampleBytes)).length);
+    }, samplePath, audio.length);
+
+    // Store-resident sources are consumed (move semantics): the inbox/ or
+    // root-level drop becomes the managed samples/ copy. Project-asset
+    // sources stay untouched.
+    if (fromStore && stored.samplePath !== samplePath) {
+      await fs.unlink(samplePath).catch(() => {});
+    }
 
     return { artifacts: [], warnings: replaced ? [`voice "${name}" already existed; sample and metadata replaced`] : [] };
   };
@@ -279,6 +372,7 @@ export async function listVoices({ env = process.env, voicesDir, fetchImpl = glo
   }
   const upstreamNames = new Set(Array.isArray(upstream.voices) ? upstream.voices : []);
   let clones = [];
+  let inbox = [];
   if (voicesDir) {
     const uploadedNames = upstreamVoicesNames(upstream);
     clones = (await loadRegistry(voicesDir)).map((entry) => ({
@@ -290,8 +384,9 @@ export async function listVoices({ env = process.env, voicesDir, fetchImpl = glo
       sampleFile: entry.sampleFile ? `voices/samples/${entry.sampleFile}` : null,
       availableUpstream: upstreamNames.has(entry.name) || uploadedNames.includes(entry.name),
     }));
+    inbox = await listInbox(voicesDir);
   }
-  return { voices: upstream.voices, uploaded_voices: upstream.uploaded_voices, clones, cache_stats: upstream.cache_stats };
+  return { voices: upstream.voices, uploaded_voices: upstream.uploaded_voices, clones, inbox, cache_stats: upstream.cache_stats };
 }
 
 function upstreamVoicesNames(upstream) {
