@@ -6,10 +6,10 @@
 # chrome-headless-shell + ffmpeg so rendering happens in-process.
 FROM node:22-bookworm-slim
 
-# Pinned HyperFrames commit, pulled from OUR fork of heygen-com/hyperframes.
-# Cloning the fork (not upstream) keeps builds working even if the upstream
-# repository is ever deleted — GitHub forks survive upstream removal.
-ARG HF_REPO=https://github.com/Pantek59/hyperframes.git
+# Pinned HyperFrames commit, cloned from the public upstream repo at build
+# time. HF_REPO/HF_REF are build args so deployments can vendor another
+# source; keep HF_REF pinned so toolchain changes never break builds silently.
+ARG HF_REPO=https://github.com/heygen-com/hyperframes.git
 ARG HF_REF=f98b8ead374c20e850995ba071c1da37cdbefe54
 
 # ── System deps: ffmpeg + headless-Chrome libs + fonts + python ───────
@@ -59,7 +59,7 @@ ENV PATH="/root/.bun/bin:$PATH"
 
 WORKDIR /app
 
-# ── Clone our fork at the pinned ref ────────────────────────────────
+# ── Clone upstream at the pinned ref ─────────────────────────────────
 RUN git clone "${HF_REPO}" /app/hf \
     && git -C /app/hf checkout "${HF_REF}"
 
@@ -86,7 +86,7 @@ RUN mkdir -p /opt/hf-samples \
     && cp -r registry/examples/product-promo /opt/hf-samples/ \
     && cp -r registry/examples/swiss-grid /opt/hf-samples/
 
-# ── Our MCP server ───────────────────────────────────────────────────────────
+# ── Our MCP server ───────────────────────────────────────────────────────
 WORKDIR /app/mcp
 COPY package.json ./
 RUN bun install
