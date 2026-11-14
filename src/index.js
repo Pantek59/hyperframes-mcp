@@ -43,6 +43,8 @@ import {
   reRegisterVoice,
 } from "./tts-voices.js";
 import { shareAssetToRenders } from "./share.js";
+import { createFishAudioRunner } from "./fish-audio.js";
+import { createComfyClient, describeFetchError, getComfyConfig } from "./comfyui.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
 const HF_CLI =
@@ -55,6 +57,7 @@ const NODE = process.execPath;
 
 const RENDER_TIMEOUT_MS = parseInt(process.env.HF_RENDER_TIMEOUT_MS || "1800000", 10);
 const TTS_API_TIMEOUT_MS = parseInt(process.env.TTS_API_TIMEOUT_MS || "300000", 10);
+const FISH_AUDIO_TIMEOUT_MS = parseInt(process.env.FISH_AUDIO_TIMEOUT_MS || "900000", 10);
 const WHISPERX_TIMEOUT_MS = parseInt(process.env.WHISPERX_TIMEOUT_MS || "1800000", 10);
 const WAIT_MAX_MS = parseInt(process.env.HF_WAIT_MAX_MS || "600000", 10);
 // Optional /files/ restriction to <project>/<prefix>/… (default off).
@@ -74,6 +77,7 @@ queue.registerRunner(
     reRegister: (name, signal) => reRegisterVoice({ voicesDir: VOICES_DIR }, name, signal),
   })
 );
+queue.registerRunner("fish_audio_tts", createFishAudioRunner());
 queue.registerRunner("whisperx_transcribe", createWhisperXRunner());
 queue.registerRunner("tts_upload_voice", createTtsUploadVoiceRunner({ voicesDir: VOICES_DIR }));
 
@@ -130,7 +134,7 @@ async function resolveProject(nameOrPath) {
 
 const rel = (abs) => path.relative(WORKSPACE, abs) || ".";
 
-// ── Job helpers ──────────────────────────────────────────────────────────────
+// ── Job helpers ──────────────────────────────────────────────────────────
 function jobFiles(job) {
   if (!job.outputDir || !job.outputs || job.outputs.length === 0) return [];
   const relDir = path.relative(WORKSPACE, job.outputDir);
@@ -534,6 +538,109 @@ function buildServer() {
   );
 
   server.registerTool(
+    "fish_audio_tts",
+    {
+      description:
+        "Lee un archivo de texto de assets/ y genera audio FLAC mediante un workflow ComfyUI de voice cloning (Fish Audio S2). " +
+        "Requiere un audio de referencia (reference_filename, relativo a assets/) y su transcript (reference_text). " +
+        "El trabajo se encola en la cola compartida; consulta get_job / wait_job para obtener la ruta del resultado.",
+      inputSchema: {
+        project: z.string().describe("Nombre del proyecto"),
+        filename: z.string().describe("Archivo de texto relativo a assets/, por ejemplo narration/script.txt"),
+        reference_filename: z.string().describe(
+          "Audio de referencia relativo a assets/, por ejemplo voice/speaker.m4a (se usa para clonar su voz)."
+        ),
+        reference_text: z.string().min(1).describe(
+          "Transcript exacto de lo que se dice en el audio de referencia."
+        ),
+        language: z.string().regex(/^[a-z]{2,3}$/i).optional().describe(
+          "Código de idioma del texto, por ejemplo de o en. Def: FISH_AUDIO_LANGUAGE."
+        ),
+        wait: z.boolean().optional().describe("true = esperar el resultado. Def false = encolar."),
+        timeout_ms: z.number().int().positive().max(3600000).optional().describe("Timeout del job en ms."),
+      },
+    },
+    async ({ project, filename, reference_filename, reference_text, language, wait, timeout_ms }) => {
+      const dir = await resolveProject(project);
+      const job = queue.enqueue({
+        kind: "fish_audio_tts",
+        project: rel(dir),
+        params: {
+          filename,
+          reference_filename,
+          reference_text,
+          language: language ? language.toLowerCase() : undefined,
+        },
+        timeoutMs: timeout_ms ?? FISH_AUDIO_TIMEOUT_MS,
+      });
+      if (!wait) return ok(jobSummary(job, "Encolado. Consulta con get_job / wait_job."));
+      const done = await queue.waitFor(job.id, Math.min(timeout_ms || WAIT_MAX_MS, WAIT_MAX_MS));
+      return done && done.status === "succeeded" ? ok(jobDetail(done)) : fail(jobDetail(done || job));
+    }
+  );
+
+  server.registerTool(
+    "comfyui_status",
+    {
+      description:
+        "Comprueba si el servidor ComfyUI (backend del TTS de Fish Audio) está accesible y disponible: " +
+        "devuelve reachable, versión, GPU, carga de la cola de ComfyUI y la cola local de jobs. Útil antes de encolar fish_audio_tts.",
+      inputSchema: {},
+    },
+    async () => {
+      const config = getComfyConfig(process.env);
+      const client = createComfyClient({ baseUrl: config.baseUrl, apiKey: config.apiKey });
+      const localQueue = queue.stats();
+      try {
+        const stats = await client.systemStats(AbortSignal.timeout(5000));
+        const device = Array.isArray(stats?.devices) ? stats.devices[0] : null;
+        let comfyQueue = { running: 0, pending: 0 };
+        try {
+          comfyQueue = await client.queueState(AbortSignal.timeout(5000));
+        } catch {
+          // The queue endpoint is informational; reachability already shown.
+        }
+        return ok(
+          JSON.stringify(
+            {
+              reachable: true,
+              base_url: config.baseUrl,
+              comfyui_version: stats?.system?.comfyui_version ?? null,
+              os: stats?.system?.os ?? null,
+              device: device
+                ? {
+                    name: device.name ?? null,
+                    type: device.type ?? null,
+                    vram_total: device.vram_total ?? null,
+                    vram_free: device.vram_free ?? null,
+                  }
+                : null,
+              comfyui_queue: comfyQueue,
+              local_queue: localQueue,
+            },
+            null,
+            2
+          )
+        );
+      } catch (error) {
+        return ok(
+          JSON.stringify(
+            {
+              reachable: false,
+              configured: Boolean(config.baseUrl),
+              base_url: config.baseUrl || null,
+              error: describeFetchError(error),
+              local_queue: localQueue,
+            },
+            null,
+            2
+          )
+        );
+      }
+    }
+  );
+
+  server.registerTool(
     "whisperx_transcribe",
     {
       description:
@@ -686,7 +793,7 @@ function buildServer() {
   return server;
 }
 
-// ── HTTP transport (hosted) ──────────────────────────────────────────────────
+// ── HTTP transport (hosted) ──────────────────────────────────────────────
 function readBody(req, limit = 10 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -757,6 +864,8 @@ async function startHttp() {
               "list_voices",
               "tts_delete_voice",
               "share_asset",
+              "fish_audio_tts",
+              "comfyui_status",
               "whisperx_transcribe",
               "create_project",
               "write_project_file",
@@ -848,7 +957,7 @@ async function startHttp() {
   });
 }
 
-// ── Boot ─────────────────────────────────────────────────────────────────────
+// ── Boot ─────────────────────────────────────────────────────────────────
 async function main() {
   if (TRANSPORT === "http") {
     await startHttp();
