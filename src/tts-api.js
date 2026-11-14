@@ -1,12 +1,8 @@
-import { constants as fsConstants, promises as fs } from "node:fs";
 import path from "node:path";
 import {
-  cleanupPublishedFile,
-  cleanupTempFile,
-  createPrivateTempFile,
-  publishNoReplace,
+  publishAssetOutput,
+  readText,
   resolveAssetInput,
-  resolveAssetOutput,
 } from "./asset-ops.js";
 
 const DEFAULT_MAX_TEXT_BYTES = 64 * 1024;
@@ -41,35 +37,6 @@ function speechEndpoint(baseUrl) {
     throw new Error("TTS_API_BASE_URL must be an HTTP(S) origin without credentials or a path");
   }
   return new URL("/v1/audio/speech", base);
-}
-
-async function readText(inputPath, maxBytes) {
-  const handle = await fs.open(inputPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile()) throw new Error("TTS input must be a regular file");
-    if (stat.size > maxBytes) throw new Error(`TTS text exceeds the ${maxBytes}-byte limit`);
-    const chunks = [];
-    let size = 0;
-    while (size <= maxBytes) {
-      const buffer = Buffer.alloc(Math.min(8192, maxBytes + 1 - size));
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, size);
-      if (bytesRead === 0) break;
-      size += bytesRead;
-      if (size > maxBytes) throw new Error(`TTS text exceeds the ${maxBytes}-byte limit`);
-      chunks.push(buffer.subarray(0, bytesRead));
-    }
-    let text;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, size));
-    } catch {
-      throw new Error("TTS input must contain valid UTF-8 text");
-    }
-    if (!text.trim() || text.includes("\0")) throw new Error("TTS input must be non-empty UTF-8 text");
-    return text;
-  } finally {
-    await handle.close();
-  }
 }
 
 async function readBoundedResponse(response, maxBytes) {
@@ -196,56 +163,20 @@ export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.f
     );
     if (signal.aborted) throw signal.reason || new Error("Job canceled");
 
-    const output = await resolveAssetOutput({
+    const output = await publishAssetOutput({
       workspace,
       projectDir,
       filename,
       jobId: job.id,
       extension: ".wav",
+      bytes: audio,
+      inputPath: input.path,
+      signal,
     });
-    if (output.inputPath !== input.path) throw new Error("TTS input changed while the job was running");
-    let temporary;
-    let identity;
-    let published = false;
-    try {
-      temporary = await createPrivateTempFile(output.parent, job.id);
-      await temporary.handle.writeFile(audio);
-      await temporary.handle.sync();
-      identity = await temporary.handle.stat();
-      await temporary.handle.close();
-      if (signal.aborted) throw signal.reason || new Error("Job canceled");
-      const revalidated = await resolveAssetOutput({
-        workspace,
-        projectDir,
-        filename,
-        jobId: job.id,
-        extension: ".wav",
-      });
-      if (revalidated.path !== output.path || revalidated.inputPath !== input.path) {
-        throw new Error("TTS asset paths changed while the job was running");
-      }
-      if (signal.aborted) throw signal.reason || new Error("Job canceled");
-      await publishNoReplace(temporary.path, output.path, output.parent, identity);
-      published = true;
-    } finally {
-      if (temporary) {
-        await temporary.handle.close().catch(() => {});
-        try {
-          await cleanupTempFile(temporary.path);
-        } catch (error) {
-          if (published) await cleanupPublishedFile(output.path, output.parent, identity).catch(() => {});
-          throw error;
-        }
-      }
-    }
-    if (signal.aborted) {
-      await cleanupPublishedFile(output.path, output.parent, identity);
-      throw signal.reason || new Error("Job canceled");
-    }
     return {
       artifacts: [output.artifactPath],
       warnings,
-      cleanup: () => cleanupPublishedFile(output.path, output.parent, identity),
+      cleanup: output.cleanup,
     };
   };
 }

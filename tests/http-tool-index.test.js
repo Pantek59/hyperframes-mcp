@@ -110,6 +110,8 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   assert.equal(response.status, 200);
   const index = await response.json();
   assert.ok(index.tools.includes("tts_generate"));
+  assert.ok(index.tools.includes("fish_audio_tts"));
+  assert.ok(index.tools.includes("comfyui_status"));
   assert.ok(index.tools.includes("whisperx_transcribe"));
 
   const mcp = await fetch(`${url}/mcp`, {
@@ -124,6 +126,8 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   assert.equal(mcp.status, 200);
   const toolResponse = await mcp.json();
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "tts_generate"));
+  assert.ok(toolResponse.result.tools.some((tool) => tool.name === "fish_audio_tts"));
+  assert.ok(toolResponse.result.tools.some((tool) => tool.name === "comfyui_status"));
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "whisperx_transcribe"));
 
   const callTool = async (args) => {
