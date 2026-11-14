@@ -19,6 +19,8 @@ surface of the Studio.
 | `tts_upload_voice` | Voice cloning: registers a reference audio sample (from any project's `assets/`, or a file dropped directly into the global voice store root/`inbox/`) as a reusable `voice`; consent required by the upstream API. Samples + metadata live **globally** in `HF_VOICES_DIR` — never inside a project |
 | `list_voices` | Lists available voices (default + clones with upstream-availability flags, plus unregistered `inbox/` drops waiting for registration) |
 | `tts_delete_voice` | Permanently removes a cloned voice (upstream + global store); `default` is protected |
+| `fish_audio_tts` | Enqueues TTS: text asset + reference voice audio + its transcript → FLAC (Fish Audio S2 voice cloning on ComfyUI) |
+| `comfyui_status` | Reports whether the ComfyUI TTS backend is running and reachable (version, GPU, queue load) |
 | `share_asset` | Copies an asset into `renders/` with an unguessable name and returns the token-free public download URL |
 | `whisperx_transcribe` | Transcribes an audio file from `assets/` with local CPU WhisperX into a timed JSON transcript |
 | `create_project` | Scaffolds a new project from an example |
@@ -46,6 +48,16 @@ status survives restarts; background job concurrency is capped by `HF_JOB_CONCUR
 - **`list_voices`:** Lists the available voices (`default` + registered clones) — use it to pick the `voice` for `tts_generate`.
 - **`share_asset`:** Copies a file from `assets/` into the project's `renders/` folder under an unguessable random name and returns the token-free public download URL (when `PUBLIC_BASE_URL` is set). Use this whenever a user needs to *click* a link to a file — browsers cannot send `Authorization` headers, and only `renders/**` is served publicly.
 - **`whisperx_transcribe`:** Runs WhisperX locally on CPU against an audio file under `<project>/assets/...`. Saves a timed JSON transcript with word- and segment-level timestamps next to the original asset. Models are downloaded on first use and cached persistently (`WHISPERX_MODEL_CACHE_DIR`).
+
+### Second TTS provider (Fish Audio on ComfyUI)
+
+Besides the primary `tts_generate` (OpenAI-compatible TTS-API), a **`fish_audio_tts`**
+tool voice-clones the narration through a ComfyUI workflow (Fish Audio S2) and
+publishes the result as FLAC. It enqueues like the other heavy jobs and requires a
+`reference_filename` (a recording of the target speaker under `assets/`) plus
+`reference_text` (the exact transcript of that recording); `language` is optional
+(default `FISH_AUDIO_LANGUAGE`). Call `comfyui_status` first to check that the
+ComfyUI backend (`COMFYUI_BASE_URL`) is running and idle before enqueuing.
 
 ### Renders get unguessable filenames
 
@@ -170,6 +182,10 @@ provider variants) lives in [`docs/traefik.md`](docs/traefik.md).
 | `HF_ROOT` / `HF_CLI` | `/app/hf` | Upstream checkout / CLI entry |
 | `HF_RENDER_TIMEOUT_MS` | `1800000` | Render timeout (30 min) |
 | `HF_RANDOMIZE_OUTPUT` | `true` | Random unguessable `renders/<token>-<name>.mp4` outputs; `false` restores legacy `-o` handling |
+| `COMFYUI_BASE_URL` / `COMFYUI_API_KEY` | _(empty)_ | ComfyUI server used by `fish_audio_tts` and `comfyui_status` (API key optional, for proxies) |
+| `FISH_AUDIO_TIMEOUT_MS` | `900000` | Fish Audio TTS job timeout — keep generous, the first job downloads the model |
+| `FISH_AUDIO_LANGUAGE` | `de` | Default language for `fish_audio_tts` (per-call `language` wins) |
+| `FISH_AUDIO_MODEL_PATH` / `FISH_AUDIO_WORKFLOW_JSON` | _(empty)_ | Optional: override the Fish node's `model_path` widget / replace the built-in workflow (API-format JSON with a Fish TTS + LoadAudio node) |
 | `PUBLIC_BASE_URL` | _(empty)_ | Public files host (no trailing slash); when set, `render` jobs return `files[].url` download links |
 | `HF_FILES_PUBLIC_PREFIX_ONLY` | _(off)_ | Optional: restrict `/files/` to `<project>/<prefix>/…` (`renders`, CSV list, or `true` = `renders`) |
 | `TTS_API_BASE_URL` | _(empty)_ | Base URL of OpenAI-compatible TTS endpoint (appends `/v1/audio/speech`) |

@@ -33,6 +33,14 @@ services:
       TTS_API_TIMEOUT_MS: ${TTS_API_TIMEOUT_MS:-300000}
       TTS_API_MAX_TEXT_BYTES: ${TTS_API_MAX_TEXT_BYTES:-65536}
       TTS_API_MAX_AUDIO_BYTES: ${TTS_API_MAX_AUDIO_BYTES:-26214400}
+      # Optional ComfyUI backend for Fish Audio TTS (S2 voice-cloning workflow);
+      # verify with the comfyui_status tool before enqueuing fish_audio_tts.
+      COMFYUI_BASE_URL: ${COMFYUI_BASE_URL:-}
+      COMFYUI_API_KEY: ${COMFYUI_API_KEY:-}
+      FISH_AUDIO_TIMEOUT_MS: ${FISH_AUDIO_TIMEOUT_MS:-900000}
+      FISH_AUDIO_MAX_TEXT_BYTES: ${FISH_AUDIO_MAX_TEXT_BYTES:-65536}
+      FISH_AUDIO_MAX_AUDIO_BYTES: ${FISH_AUDIO_MAX_AUDIO_BYTES:-26214400}
+      FISH_AUDIO_LANGUAGE: ${FISH_AUDIO_LANGUAGE:-de}
       # Local CPU-only WhisperX. The named volume preserves model/alignment downloads.
       WHISPERX_EXECUTABLE: ${WHISPERX_EXECUTABLE:-/opt/whisperx-venv/bin/whisperx}
       WHISPERX_MODEL: ${WHISPERX_MODEL:-base}
