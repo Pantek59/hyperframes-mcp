@@ -218,9 +218,9 @@ Tests cover the render-output randomiser, public URL construction, the
 
 - Rendering is CPU/RAM heavy → it runs through a **persistent job queue**
   (`src/jobs.js`) with capped concurrency, so the MCP request returns instantly.
-- The image is large (Chrome + ffmpeg + CPU PyTorch/WhisperX + the full toolchain) and the build clones
-  **our fork** of upstream (`Pantek59/hyperframes`, pinned with `HF_REF`) for
-  reproducibility — the fork keeps working even if the upstream repo is removed.
+- The image is large (Chrome + ffmpeg + CPU PyTorch/WhisperX + the full toolchain) and the build clones the
+  **public upstream** (`heygen-com/hyperframes`, pinned with `HF_REF`) for
+  reproducibility — builds stay deterministic as long as that commit exists.
 - CI builds and publishes the image to GHCR (`ghcr.io/pantek59/hyperframes-mcp`)
   on every push to `main` — see `.github/workflows/docker-publish.yml`.
 - Not a fork of upstream — this repo carries only the server + deployment recipe.
