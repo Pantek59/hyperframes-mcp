@@ -77,7 +77,7 @@ queue.registerRunner(
     reRegister: (name, signal) => reRegisterVoice({ voicesDir: VOICES_DIR }, name, signal),
   })
 );
-queue.registerRunner("fish_audio_tts", createFishAudioRunner());
+queue.registerRunner("fish_audio_tts", createFishAudioRunner({ voicesDir: VOICES_DIR }));
 queue.registerRunner("whisperx_transcribe", createWhisperXRunner());
 queue.registerRunner("tts_upload_voice", createTtsUploadVoiceRunner({ voicesDir: VOICES_DIR }));
 
@@ -396,12 +396,13 @@ function buildServer() {
     "tts_upload_voice",
     {
       description:
-        "Clona una voz desde una muestra de audio: la registra en el endpoint de voces del TTS-API " +
-        "(/v1/audio/voices, multipart) como `voice` reutilizable en tts_generate y la guarda en el almacén " +
-        "GLOBAL de voces (HF_VOICES_DIR, independiente del proyecto; sobrevive a evicciones/reinicios y se " +
-        "re-registra automáticamente). Fuente de la muestra: un archivo de assets/ de un project, O un " +
-        "archivo soltado directamente en la carpeta del almacén (voices/ raíz o voices/inbox/) sin project. " +
-        "Ética y legalidad: SOLO muestras cuya voz está autorizada a clonar (es la tuya o tienes permiso " +
+        "Clona una voz desde una muestra de audio y la registra UNA SOLA VEZ en el registro global (HF_VOICES_DIR, " +
+        "independiente de proyectos), sirviendo a AMBOS backends TTS: Higgs/TTS-API (tts_generate usa la voz por " +
+        "nombre; también se registra upstream en /v1/audio/voices con re-registro automático tras evicciones) y " +
+        "Fish Audio S2 vía ComfyUI (fish_audio_tts con voice=<name>; clona por job desde la muestra + transcript). " +
+        "Por eso ref_text (transcript exacto) es OBLIGATORIO. Fuente de la muestra: un archivo de assets/ de un " +
+        "project, O un archivo soltado directamente en la carpeta del almacén (voices/ raíz o voices/inbox/) sin " +
+        "project. Ética y legalidad: SOLO muestras cuya voz está autorizada a clonar (es la tuya o tienes permiso " +
         "explícito); el endpoint exige una declaración de consent. Encola el trabajo; confirma con list_voices.",
       inputSchema: {
         project: z
@@ -414,7 +415,7 @@ function buildServer() {
         name: z
           .string()
           .regex(/^[A-Za-z0-9._-]{1,64}$/)
-          .describe("Nombre de la voz en el registro (1–64 caracteres, [A-Za-z0-9._-]); usable luego como `voice`"),
+          .describe("Nombre de la voz en el registro (1–64 caracteres, [A-Za-z0-9._-]); usable luego como `voice` en tts_generate y fish_audio_tts"),
         consent: z
           .string()
           .min(1)
@@ -425,8 +426,14 @@ function buildServer() {
           ),
         ref_text: z
           .string()
+          .min(1)
+          .max(10000)
+          .describe("Transcript exacto de lo que se dice en la muestra (obligatorio: Fish Audio S2 clona con él)"),
+        language: z
+          .string()
+          .regex(/^[A-Za-z]{2,3}$/)
           .optional()
-          .describe("Transcripción del texto hablado en la muestra (mejora la calidad del clon)"),
+          .describe('Código de idioma de la voz (ej. "de", "en") — lo usa fish_audio_tts como def; el TTS-API/Higgs no lo necesita'),
         speaker_description: z
           .string()
           .optional()
@@ -435,12 +442,12 @@ function buildServer() {
         timeout_ms: z.number().int().positive().max(3600000).optional().describe("Timeout del job en ms."),
       },
     },
-    async ({ project, filename, name, consent, ref_text, speaker_description, wait, timeout_ms }) => {
+    async ({ project, filename, name, consent, ref_text, language, speaker_description, wait, timeout_ms }) => {
       const dir = project ? await resolveProject(project) : undefined;
       const job = queue.enqueue({
         kind: "tts_upload_voice",
         project: dir ? rel(dir) : null,
-        params: { filename, name, consent, refText: ref_text, speakerDescription: speaker_description },
+        params: { filename, name, consent, refText: ref_text, language, speakerDescription: speaker_description },
         timeoutMs: timeout_ms ?? TTS_API_TIMEOUT_MS,
       });
       if (!wait) return ok(jobSummary(job, `Encolado. Consulta con get_job / wait_job o confirma con list_voices (${name}).`));
@@ -454,8 +461,9 @@ function buildServer() {
     {
       description:
         "Lista las voces disponibles en el TTS-API (/v1/audio/voices) más las voces clonadas en el almacén " +
-        "global del servidor (independiente de proyectos). Cada clon lleva `availableUpstream` (evicted = " +
-        "falso; se re-registra automáticamente en tts_generate) — úsala para elegir el parámetro `voice`.",
+        "global del servidor (independiente de proyectos, sirve a AMBOS backends). Cada clon lleva " +
+        "`availableUpstream` (evicted = falso; se re-registra automáticamente en tts_generate) y `fishReady` " +
+        "(tiene transcript → usable con fish_audio_tts) — úsala para elegir el parámetro `voice`.",
       inputSchema: {},
     },
     async () => {
@@ -542,31 +550,41 @@ function buildServer() {
     {
       description:
         "Lee un archivo de texto de assets/ y genera audio FLAC mediante un workflow ComfyUI de voice cloning (Fish Audio S2). " +
-        "Requiere un audio de referencia (reference_filename, relativo a assets/) y su transcript (reference_text). " +
+        "Voz por REFERENCIA: pasa voice=<nombre> de una voz registrada globalmente (el registro GLOBAL HF_VOICES_DIR, " +
+        "compartido con Higgs/TTS-API, aporta muestra + transcript — ver list_voices; se clona por job desde el almacén). " +
+        "O modo ad-hoc: reference_filename (audio de referencia relativo a assets/) + reference_text (transcript exacto). " +
         "El trabajo se encola en la cola compartida; consulta get_job / wait_job para obtener la ruta del resultado.",
       inputSchema: {
         project: z.string().describe("Nombre del proyecto"),
         filename: z.string().describe("Archivo de texto relativo a assets/, por ejemplo narration/script.txt"),
-        reference_filename: z.string().describe(
-          "Audio de referencia relativo a assets/, por ejemplo voice/speaker.m4a (se usa para clonar su voz)."
+        voice: z
+          .string()
+          .regex(/^[A-Za-z0-9._-]{1,64}$/)
+          .optional()
+          .describe(
+            "Nombre de una voz clonada registrada globalmente (tts_upload_voice / list_voices): usa su muestra + transcript del almacén sin necesitar assets en el proyecto. Tiene prioridad sobre la pareja reference_*."
+          ),
+        reference_filename: z.string().optional().describe(
+          "Modo ad-hoc (si omites voice): audio de referencia relativo a assets/, por ejemplo voice/speaker.m4a (se usa para clonar su voz)."
         ),
-        reference_text: z.string().min(1).describe(
-          "Transcript exacto de lo que se dice en el audio de referencia."
+        reference_text: z.string().min(1).optional().describe(
+          "Modo ad-hoc (si omites voice): transcript exacto de lo que se dice en el audio de referencia."
         ),
         language: z.string().regex(/^[a-z]{2,3}$/i).optional().describe(
-          "Código de idioma del texto, por ejemplo de o en. Def: FISH_AUDIO_LANGUAGE."
+          "Código de idioma del texto, por ejemplo de o en. Def: language de la voz registrada > FISH_AUDIO_LANGUAGE."
         ),
         wait: z.boolean().optional().describe("true = esperar el resultado. Def false = encolar."),
         timeout_ms: z.number().int().positive().max(3600000).optional().describe("Timeout del job en ms."),
       },
     },
-    async ({ project, filename, reference_filename, reference_text, language, wait, timeout_ms }) => {
+    async ({ project, filename, voice, reference_filename, reference_text, language, wait, timeout_ms }) => {
       const dir = await resolveProject(project);
       const job = queue.enqueue({
         kind: "fish_audio_tts",
         project: rel(dir),
         params: {
           filename,
+          voice: voice || undefined,
           reference_filename,
           reference_text,
           language: language ? language.toLowerCase() : undefined,
