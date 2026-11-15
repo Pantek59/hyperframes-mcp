@@ -464,7 +464,7 @@ export async function reRegisterVoice({ env = process.env, voicesDir, fetchImpl 
   return true;
 }
 
-// ── tts_delete_voice ─────────────────────────────────────────────────────
+// ── tts_delete_voice ─────────────────────────────────────────────────────────
 
 export async function deleteVoice({ env = process.env, voicesDir, fetchImpl = globalThis.fetch } = {}, name, signal) {
   const clean = validateName(name);
