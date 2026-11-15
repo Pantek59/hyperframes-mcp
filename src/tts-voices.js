@@ -13,8 +13,12 @@
  * canonical sample so voices survive evictions and sglang restarts:
  *
  *   <HF_VOICES_DIR>/
- *     registry.json               # [{ name, consent, refText, speakerDescription, sampleFile, sampleMime, sampleSize, createdAt }]
+ *     registry.json               # [{ name, consent, refText, language, speakerDescription, sampleFile, sampleMime, sampleSize, createdAt }]
  *     samples/<name>.<ext>        # canonical sample copy
+ *
+ * The registry is the single voice registry for BOTH TTS backends: the
+ * TTS-API (Higgs, voices referenced by name) and the ComfyUI Fish Audio S2
+ * runner (voices cloned per job from the stored sample + refText + language).
  *
  * The store lives OUTSIDE HF_WORKSPACE: the token-free /files/ route is rooted
  * at the workspace, so voice samples are never publicly reachable.
@@ -121,7 +125,7 @@ async function ensureJson(response, maxBytes) {
   return JSON.parse(body.toString("utf8"));
 }
 
-// ── Voice store (project-independent) ────────────────────────────────────────
+// ── Voice store (project-independent) ───────────────────────────────────────────────
 
 function storeRoots(voicesDir) {
   if (typeof voicesDir !== "string" || !voicesDir.trim()) {
@@ -195,6 +199,39 @@ export function validateName(name) {
     throw new Error("Voice name must match [A-Za-z0-9._-] and be 1–64 characters");
   }
   return clean;
+}
+
+/** Language code stored with a registry entry (used by the Fish S2 backend). */
+export function normalizeLanguage(language) {
+  const clean = String(language ?? "").trim();
+  if (!clean) return "";
+  if (!/^[A-Za-z]{2,3}$/.test(clean)) {
+    throw new Error("Language must be a 2–3 letter ISO code (e.g. de, en, spa)");
+  }
+  return clean.toLowerCase();
+}
+
+/**
+ * Resolve a stored voice for ANY backend: returns
+ * { name, entry, samplePath, refText, language } or NULL when the name is not
+ * stored (or its sample file went missing). `entry` carries consent and other
+ * registration metadata; callers must handle a null refText (legacy entries
+ * registered before transcripts became required are not Fish-ready).
+ */
+export async function getStoredVoice(voicesDir, name) {
+  const clean = validateName(name);
+  if (clean === "default") {
+    throw new Error('"default" is the upstream built-in voice, not a stored clone — fish_audio_tts cannot use it');
+  }
+  if (!voicesDir) throw new Error("No voice store configured (HF_VOICES_DIR)");
+  const entry = (await loadRegistry(voicesDir)).find((e) => e.name === clean);
+  if (!entry) return null;
+  const { samplesDir } = storeRoots(voicesDir);
+  const samplePath = entry.sampleFile ? path.join(samplesDir, entry.sampleFile) : null;
+  if (!samplePath) return null;
+  const stat = await fs.stat(samplePath).catch(() => null);
+  if (!stat || !stat.isFile()) return null;
+  return { name: clean, entry, samplePath, refText: String(entry.refText ?? ""), language: entry.language || null };
 }
 
 /** Upload a sample file upstream (the shared clone-registration step). */
@@ -295,7 +332,14 @@ export function createTtsUploadVoiceRunner({ env = process.env, voicesDir, fetch
     const consent = String(params.consent ?? "").trim();
     if (!consent) throw new Error("A consent statement is required to register a cloned voice");
     if (consent.length > 1000) throw new Error("Consent statement exceeds 1000 characters");
+    // The transcript is NOT optional: Fish Audio S2 cloning (ComfyUI) needs the
+    // exact transcript to clone from the same stored sample, so every registry
+    // entry must carry one to keep both backends usable.
     const refText = String(params.refText ?? "").trim().slice(0, 10_000);
+    if (!refText) {
+      throw new Error("A reference transcript (ref_text) is required to register a voice — Fish Audio S2 cloning needs the exact transcript of the sample");
+    }
+    const language = normalizeLanguage(params.language);
     const speakerDescription = String(params.speakerDescription ?? "").trim().slice(0, 2000);
 
     // Sample source 1: a project's assets/ (as before).
@@ -339,6 +383,7 @@ export function createTtsUploadVoiceRunner({ env = process.env, voicesDir, fetch
       name,
       consent,
       refText,
+      language: language || undefined,
       speakerDescription,
       createdAt: new Date().toISOString(),
       sampleMime: SAMPLE_MIMES[ext],
@@ -378,10 +423,14 @@ export async function listVoices({ env = process.env, voicesDir, fetchImpl = glo
     clones = (await loadRegistry(voicesDir)).map((entry) => ({
       name: entry.name,
       refText: entry.refText || null,
+      language: entry.language || null,
       speakerDescription: entry.speakerDescription || null,
       createdAt: entry.createdAt || null,
       sampleSize: entry.sampleSize ?? null,
       sampleFile: entry.sampleFile ? `voices/samples/${entry.sampleFile}` : null,
+      // Fish Audio S2 (ComfyUI) clones from sample + exact transcript per job;
+      // legacy entries registered before refText became required cannot be used there.
+      fishReady: Boolean(entry.refText),
       availableUpstream: upstreamNames.has(entry.name) || uploadedNames.includes(entry.name),
     }));
     inbox = await listInbox(voicesDir);
@@ -415,7 +464,7 @@ export async function reRegisterVoice({ env = process.env, voicesDir, fetchImpl 
   return true;
 }
 
-// ── tts_delete_voice ─────────────────────────────────────────────────────────
+// ── tts_delete_voice ─────────────────────────────────────────────────────
 
 export async function deleteVoice({ env = process.env, voicesDir, fetchImpl = globalThis.fetch } = {}, name, signal) {
   const clean = validateName(name);
