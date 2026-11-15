@@ -1,11 +1,18 @@
 /**
  * fish-audio.js — Fish Audio S2 voice-cloning TTS runner backed by ComfyUI.
  *
- * Flow: read the narration text + reference voice assets from the project,
- * upload the reference into ComfyUI's input dir, submit the API-format
- * workflow (POST /prompt), poll /history until done, download the produced
- * audio via /view, validate it and publish it next to the text asset as a
- * non-replacing per-job artifact (same semantics as the Higgs runner).
+ * Flow: read the narration text from the project's assets/, resolve the
+ * reference voice (a globally stored clone via `voice`, or a raw
+ * `reference_filename`/`reference_text` pair from the project), upload the
+ * reference into ComfyUI's input dir, submit the API-format workflow
+ * (POST /prompt), poll /history until done, download the produced audio via
+ * /view, validate it and publish it next to the text asset as a non-replacing
+ * per-job artifact (same semantics as the Higgs runner).
+ *
+ * Voice mode: when the job references a stored voice (the global registry in
+ * HF_VOICES_DIR, shared with the Higgs/TTS-API backend), its canonical sample
+ * and exact transcript come from the voice store — project-independent. The
+ * sample is still uploaded into ComfyUI per job, which keeps no clone cache.
  *
  * The built-in template mirrors the deployment-tested Fish S2 voice-clone
  * workflow. A custom workflow (ComfyUI API format) can replace it through
@@ -15,6 +22,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { createComfyClient, getComfyConfig } from "./comfyui.js";
+import { getStoredVoice } from "./tts-voices.js";
 import {
   publishAssetOutput,
   readText,
@@ -154,7 +162,24 @@ function validateAudio({ buffer, filename }) {
   throw new Error(`ComfyUI produced an unsupported audio format: .${extension || "unknown"}`);
 }
 
-export function createFishAudioRunner({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
+/** Resolve voice mode: a registered global clone usable by the Fish backend. */
+async function resolveStoredVoice(voicesDir, voiceName) {
+  let stored;
+  try {
+    stored = await getStoredVoice(voicesDir, voiceName);
+  } catch (error) {
+    throw new Error(`voice "${voiceName}": ${error.message}`);
+  }
+  if (!stored) {
+    throw new Error(`Unknown stored voice "${voiceName}" — list_voices shows what is registered (create clones with tts_upload_voice)`);
+  }
+  if (!stored.refText) {
+    throw new Error(`Stored voice "${voiceName}" has no reference transcript — re-register it with tts_upload_voice including ref_text to make it Fish-ready`);
+  }
+  return stored;
+}
+
+export function createFishAudioRunner({ env = process.env, fetchImpl = globalThis.fetch, voicesDir = null } = {}) {
   return async (job, { workspace, signal }) => {
     const comfy = getComfyConfig(env);
     const config = getFishAudioConfig(env);
@@ -162,17 +187,14 @@ export function createFishAudioRunner({ env = process.env, fetchImpl = globalThi
 
     const params = job.params || {};
     const filename = params.filename;
-    const referenceFilename = params.reference_filename;
-    const referenceText = typeof params.reference_text === "string" ? params.reference_text.trim() : "";
-    if (!referenceFilename) {
-      throw new Error("Fish Audio TTS requires reference_filename (relative to assets/)");
-    }
-    if (!referenceText) {
-      throw new Error("Fish Audio TTS requires reference_text (the transcript of the reference audio)");
-    }
-    const language = typeof params.language === "string" && params.language.trim()
+    // Reference source (voice wins): `voice` selects a stored global clone;
+    // otherwise the raw per-call reference pair from the project's assets/.
+    const voiceName = String(params.voice ?? "").trim();
+    const referenceFilename = typeof params.reference_filename === "string" ? params.reference_filename.trim() : "";
+    const rawReferenceText = typeof params.reference_text === "string" ? params.reference_text.trim() : "";
+    const perCallLanguage = typeof params.language === "string" && params.language.trim()
       ? params.language.trim().toLowerCase()
-      : config.language;
+      : null;
 
     const projectDir = path.resolve(workspace, job.project || ".");
     const input = await resolveAssetInput({ workspace, projectDir, filename });
@@ -180,19 +202,48 @@ export function createFishAudioRunner({ env = process.env, fetchImpl = globalThi
     if (signal.aborted) throw signal.reason || new Error("Job canceled");
     const template = await loadWorkflowTemplate(config);
 
-    const reference = await resolveAssetInput({ workspace, projectDir, filename: referenceFilename });
-    if (reference.stat.size > config.maxAudioBytes) {
-      throw new Error(`Reference audio exceeds the ${config.maxAudioBytes}-byte limit`);
+    let referenceBytes;
+    let uploadedName;
+    let referenceText;
+    let language;
+    if (voiceName) {
+      const stored = await resolveStoredVoice(voicesDir, voiceName);
+      const stat = await fs.stat(stored.samplePath);
+      if (stat.size > config.maxAudioBytes) {
+        throw new Error(`Voice sample "${voiceName}" exceeds the ${config.maxAudioBytes}-byte limit`);
+      }
+      referenceBytes = await fs.readFile(stored.samplePath);
+      if (referenceBytes.length !== stat.size) {
+        throw new Error("Reference audio changed while the job was running");
+      }
+      if (signal.aborted) throw signal.reason || new Error("Job canceled");
+      uploadedName = stored.entry.sampleFile || path.basename(stored.samplePath);
+      referenceText = stored.refText;
+      language = perCallLanguage || stored.language || config.language;
+    } else {
+      if (!referenceFilename) {
+        throw new Error('Fish Audio TTS requires "voice" (a registered global voice) or a raw reference pair (reference_filename)');
+      }
+      if (!rawReferenceText) {
+        throw new Error('Fish Audio TTS requires "voice" (a registered global voice) or a raw reference pair (reference_text)');
+      }
+      const reference = await resolveAssetInput({ workspace, projectDir, filename: referenceFilename });
+      if (reference.stat.size > config.maxAudioBytes) {
+        throw new Error(`Reference audio exceeds the ${config.maxAudioBytes}-byte limit`);
+      }
+      referenceBytes = await fs.readFile(reference.path);
+      if (referenceBytes.length !== reference.stat.size) {
+        throw new Error("Reference audio changed while the job was running");
+      }
+      if (signal.aborted) throw signal.reason || new Error("Job canceled");
+      uploadedName = referenceFilename.split("/").pop();
+      referenceText = rawReferenceText;
+      language = perCallLanguage || config.language;
     }
-    const referenceBytes = await fs.readFile(reference.path);
-    if (referenceBytes.length !== reference.stat.size) {
-      throw new Error("Reference audio changed while the job was running");
-    }
-    if (signal.aborted) throw signal.reason || new Error("Job canceled");
 
     const upload = await client.uploadFile({
       buffer: referenceBytes,
-      filename: referenceFilename.split("/").pop(),
+      filename: uploadedName,
       signal,
     });
     if (signal.aborted) throw signal.reason || new Error("Job canceled");

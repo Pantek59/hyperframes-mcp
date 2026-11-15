@@ -1,38 +1,41 @@
 services:
   hyperframes-mcp:
-    build:
-      context: https://github.com/Pantek59/hyperframes-mcp.git#main
-      dockerfile: Dockerfile
-    image: hyperframes-mcp:latest
+    image: ghcr.io/pantek59/hyperframes-mcp:latest
+    container_name: hyperframes-mcp
     restart: unless-stopped
+    init: true
+    shm_size: "2gb"
+    # No published port: LibreChat (MCP client) and Traefik reach it over the
+    # `traefik` docker network. Uncomment for one-off local debugging:
+    # ports:
+    #   - "127.0.0.1:8090:8080"
     environment:
-      # Set a token to require "Authorization: Bearer <token>" on every call
-      # (except the public /health). Leave empty to keep the endpoint open.
-      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       MCP_TRANSPORT: http
+      PORT: "8080"
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:?set MCP_AUTH_TOKEN in .env}
       HF_WORKSPACE: /data/projects
       HF_JOBS_DIR: /data/jobs
-      # Rendering and transcription are CPU-bound; this limit applies to all jobs.
+      # Global voice store for clones (independent from projects)
+      HF_VOICES_DIR: /data/voices
       HF_JOB_CONCURRENCY: ${HF_JOB_CONCURRENCY:-1}
       HF_WAIT_MAX_MS: ${HF_WAIT_MAX_MS:-600000}
       HF_JOB_TAIL_LINES: ${HF_JOB_TAIL_LINES:-200}
-      # Public files host (no trailing slash). When set, render jobs return a
-      # public download `url` per file under <project>/renders/**.
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
-      # Unguessable render filenames (default true; false restores legacy
-      # CLI naming and the raw -o handling — local use only).
       HF_RANDOMIZE_OUTPUT: ${HF_RANDOMIZE_OUTPUT:-true}
-      # Optional defence in depth: restrict /files/ to <project>/<prefix>/….
-      # Empty = off; "true" = renders; or a comma-separated prefix list.
+      # Must match the hf-files router host below. When set, render jobs
+      # return a public download `url per file under <project>/renders/**`
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://files.librechat.home.pantek.ch}
+      # Defence in depth only: leave empty (the Traefik router already restricts).
       HF_FILES_PUBLIC_PREFIX_ONLY: ${HF_FILES_PUBLIC_PREFIX_ONLY:-}
-      # Optional OpenAI-compatible TTS-API endpoint (/v1/audio/speech); model and voice are deployment-specific.
+      # BASE_URL must point at the sglang-omni box; model/voice match that deployment
       TTS_API_BASE_URL: ${TTS_API_BASE_URL:-}
-      TTS_API_MODEL: ${TTS_API_MODEL:-}
-      TTS_API_VOICE: ${TTS_API_VOICE:-}
+      TTS_API_MODEL: ${TTS_API_MODEL:-bosonai/higgs-tts-3-4b}
+      TTS_API_VOICE: ${TTS_API_VOICE:-default}
       TTS_API_API_KEY: ${TTS_API_API_KEY:-}
       TTS_API_TIMEOUT_MS: ${TTS_API_TIMEOUT_MS:-300000}
       TTS_API_MAX_TEXT_BYTES: ${TTS_API_MAX_TEXT_BYTES:-65536}
       TTS_API_MAX_AUDIO_BYTES: ${TTS_API_MAX_AUDIO_BYTES:-26214400}
+      # Voice cloning: max size of an uploaded clone sample (mp3/wav/…)
+      TTS_API_MAX_SAMPLE_BYTES: ${TTS_API_MAX_SAMPLE_BYTES:-26214400}
       # Optional ComfyUI backend for Fish Audio TTS (S2 voice-cloning workflow);
       # verify with the comfyui_status tool before enqueuing fish_audio_tts.
       COMFYUI_BASE_URL: ${COMFYUI_BASE_URL:-}
@@ -48,35 +51,40 @@ services:
       WHISPERX_TIMEOUT_MS: ${WHISPERX_TIMEOUT_MS:-1800000}
       WHISPERX_MAX_AUDIO_BYTES: ${WHISPERX_MAX_AUDIO_BYTES:-524288000}
       WHISPERX_MAX_JSON_BYTES: ${WHISPERX_MAX_JSON_BYTES:-20971520}
-      PORT: "8080"
     volumes:
-      - hf-mcp-projects:/data/projects
-      - hf-mcp-jobs:/data/jobs
-      - "hf-mcp-whisperx:${WHISPERX_MODEL_CACHE_DIR:-/data/whisperx-cache}"
+      - ./workspace:/data/projects
+      - ./jobs:/data/jobs
+      - ./voices:/data/voices # global voice store for clones (project-independent)
+      - ./whisperx-cache:${WHISPERX_MODEL_CACHE_DIR:-/data/whisperx-cache} # persists WhisperX model downloads
+    networks:
+      - test-network
     labels:
       - traefik.enable=true
-      - traefik.docker.network=dokploy-network
-
-      - traefik.http.routers.hf-mcp-web.rule=Host(`hyperframes-mcp.lab.whitelabel.lat`)
-      - traefik.http.routers.hf-mcp-web.entrypoints=web
-      - traefik.http.routers.hf-mcp-web.service=hf-mcp-web
-      - traefik.http.routers.hf-mcp-web.middlewares=redirect-to-https@file
-
-      - traefik.http.routers.hf-mcp-websecure.rule=Host(`hyperframes-mcp.lab.whitelabel.lat`)
-      - traefik.http.routers.hf-mcp-websecure.entrypoints=websecure
-      - traefik.http.routers.hf-mcp-websecure.service=hf-mcp-websecure
-      - traefik.http.routers.hf-mcp-websecure.tls.certresolver=letsencrypt
-
-      - traefik.http.services.hf-mcp-web.loadbalancer.server.port=8080
-      - traefik.http.services.hf-mcp-websecure.loadbalancer.server.port=8080
-    networks:
-      - dokploy-network
-
-volumes:
-  hf-mcp-projects:
-  hf-mcp-jobs:
-  hf-mcp-whisperx:
+      - traefik.docker.network=traefik
+      # ── public files host: /files/<project>/renders/<file> ONLY ──────
+      # PathRegexp (NOT PathPrefix) is anchored so snapshots/, assets/ and
+      # project sources never match — anything else on this host 404s at Traefik.
+      - "traefik.http.routers.hf-files.rule=Host(`files.librechat.home.pantek.ch`) && PathRegexp(`/files/[^/]+/renders/.+`)"
+      - "traefik.http.routers.hf-files.entrypoints=wanhttps"
+      - "traefik.http.routers.hf-files.service=hf-files"
+      - "traefik.http.routers.hf-files.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.hf-files.middlewares=hf-files-token,hf-files-noindex"
+      # HTTP→HTTPS (reuses the https-redirect middleware your api defines)
+      - "traefik.http.routers.hf-files-web.rule=Host(`files.librechat.home.pantek.ch`) && PathRegexp(`/files/[^/]+/renders/.+`)"
+      - "traefik.http.routers.hf-files-web.entrypoints=wanhttp"
+      - "traefik.http.routers.hf-files-web.service=hf-files"
+      - "traefik.http.routers.hf-files-web.middlewares=https-redirect@docker"
+      - "traefik.http.services.hf-files.loadbalancer.server.port=8080"
+      # Proxy injects the same bearer token the server requires on /files/;
+      # missing/stale middleware fails safe → 401, never an unauthenticated leak.
+      - "traefik.http.middlewares.hf-files-token.headers.customrequestheaders.Authorization=Bearer ${MCP_AUTH_TOKEN}"
+      - "traefik.http.middlewares.hf-files-noindex.headers.customresponseheaders.X-Robots-Tag=noindex"
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null 2>&1 || curl -fsS http://127.0.0.1:8080/health >/dev/null" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 networks:
-  dokploy-network:
-    external: true
+  test-network:
