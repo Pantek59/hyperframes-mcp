@@ -125,7 +125,7 @@ async function ensureJson(response, maxBytes) {
   return JSON.parse(body.toString("utf8"));
 }
 
-// ── Voice store (project-independent) ───────────────────────────────────────────────
+// ── Voice store (project-independent) ────────────────────────────────────────
 
 function storeRoots(voicesDir) {
   if (typeof voicesDir !== "string" || !voicesDir.trim()) {
