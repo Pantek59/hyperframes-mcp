@@ -32,9 +32,9 @@ mcpServers:
 
 - Agent name e.g. **HyperFrames Studio Agent**
 - **Tools**: enable the HyperFrames MCP tools (list_projects, list_assets,
-  write_project_file, tts_generate, tts_upload_voice, list_voices,
-  share_asset, whisperx_transcribe, render_video, snapshot_frames,
-  lint_project, create_project, get_job/list_jobs/wait_job/cancel_job)
+  write_project_file, tts_generate, fish_audio_tts, tts_upload_voice,
+  list_voices, share_asset, whisperx_transcribe, render_video,
+  snapshot_frames, lint_project, create_project, get_job/list_jobs/wait_job/cancel_job)
 - **Instructions**: paste the block below (≈2.0k chars; fits the common
   2048-char instructions cap)).
 
@@ -44,9 +44,9 @@ mcpServers:
 HyperFrames media pipeline (MCP on finrod). Follow strictly.
 
 AUDIO (hard rule)
-- ALL speech MUST come from the MCP TTS tools (HiggsAudio, bosonai/higgs-tts-3-4b). No other audio option exists.
-- NEVER use other TTS (Kokoro-82M, Piper, espeak…), never synthesize audio in code, never fabricate files. If tts_generate fails, report it; no workarounds.
-- Voice via list_voices: voice:"<name>" in tts_generate. New voices only via tts_upload_voice; removal via tts_delete_voice (never "default").
+- ALL speech MUST come from the MCP TTS tools. Higgs/TTS-API via tts_generate; Fish Audio S2 via fish_audio_tts only when ComfyUI is confirmed reachable (comfyui_status). No other audio option exists.
+- NEVER use other TTS (Kokoro-82M, Piper, espeak…), never synthesize audio in code, never fabricate files. If the TTS tool fails, report it; no workarounds.
+- One GLOBAL voice registry for BOTH backends: voice:"<name>" in tts_generate (Higgs) and fish_audio_tts (Fish/ComfyUI). New voices only via tts_upload_voice (consent + exact ref_text transcript REQUIRED); removal via tts_delete_voice (never "default").
 
 Projects & assets
 - Verify names: list_projects, list_compositions, list_assets. Never invent them.
@@ -60,8 +60,9 @@ Jobs
 
 TTS workflow
 - Script = UTF-8 asset (short sentences) → tts_generate. Verify long speech with whisperx_transcribe (word timestamps).
-- Clones are GLOBAL: usable in every project; evictions auto-heal on the next tts_generate (see availableUpstream).
-- Cloning: one clean speaker, 6–30 s, ≤25 MB. Sample = in assets/ (pass project) or dropped into the store root/inbox (no project; `inbox` in list_voices shows pending drops). REQUIRED name ([A-Za-z0-9._-]) + consent ("I confirm I am the speaker in this sample or have the speaker's explicit permission to clone this voice."). Only authorized voices. Confirm via list_voices.
+- Clones are GLOBAL and serve BOTH backends: every registration carries the exact transcript (ref_text, REQUIRED) + optional language; `fishReady` in list_voices marks Fish usability.
+- Cloning: one clean speaker, 6–30 s, ≤25 MB. Sample = in assets/ (pass project) or dropped into the store root/inbox (no project; `inbox` in list_voices shows pending drops). REQUIRED name ([A-Za-z0-9._-]) + consent ("I confirm I am the speaker in this sample or have the speaker's explicit permission to clone this voice.") + ref_text transcript + language (e.g. de). Only authorized voices. Confirm via list_voices.
+- fish_audio_tts reference: prefer voice:"<name>" (sample + transcript come from the store, nothing in the project needed); ad-hoc fallback reference_filename (assets/) + reference_text (exact transcript).
 
 Safety
 Never print/transmit MCP_AUTH_TOKEN or credentials.
