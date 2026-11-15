@@ -324,6 +324,145 @@ test("supports a custom workflow JSON override", async (t) => {
   assert.deepEqual((await readdir(narrationDir)).sort(), ["script.job-test.flac", "script.txt"]);
 });
 
+async function makeVoiceStore(t, voices = [{ name: "pantek", refText: "Transcript stored in the registry.", language: "de" }]) {
+  const voicesDir = await mkdtemp(path.join(tmpdir(), "hf-fish-store-"));
+  const samplesDir = path.join(voicesDir, "samples");
+  await mkdir(samplesDir, { recursive: true });
+  const registry = [];
+  for (const voice of voices) {
+    const sampleFile = `${voice.name}${voice.ext || ".m4a"}`;
+    const bytes = Buffer.from(voice.sampleBytes ?? "STORE-AUDIO-BYTES", "utf8");
+    await writeFile(path.join(samplesDir, sampleFile), bytes);
+    registry.push({
+      name: voice.name,
+      consent: "test-only consent",
+      refText: voice.refText ?? null,
+      language: voice.language ?? null,
+      speakerDescription: null,
+      sampleFile,
+      sampleMime: "audio/mp4",
+      sampleSize: bytes.length,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  await writeFile(path.join(voicesDir, "registry.json"), JSON.stringify(registry, null, 2));
+  t.after(() => rm(voicesDir, { recursive: true, force: true }));
+  return voicesDir;
+}
+
+test("voice mode: resolves the stored sample + transcript + language from the global voice store", async (t) => {
+  const { env, state } = await startComfy(t, freshState());
+  const { workspace, narrationDir } = await makeInput(t);
+  const voicesDir = await makeVoiceStore(t);
+  const runner = createFishAudioRunner({ env, voicesDir });
+
+  const result = await runner(
+    job("job-voice", { voice: "pantek", reference_filename: undefined, reference_text: undefined, language: undefined }),
+    { workspace, signal: new AbortController().signal }
+  );
+
+  assert.deepEqual(result.artifacts, ["assets/narration/script.job-voice.flac"]);
+  assert.ok(state.uploads[0].includes("STORE-AUDIO-BYTES"));
+  assert.ok(state.uploads[0].includes('filename="pantek.m4a"'));
+  assert.ok(!state.uploads[0].includes("VOICEREF-AUDIO-BYTES"));
+  const workflow = state.prompts[0].prompt;
+  assert.equal(workflow["2"].inputs.audio, "renamed.m4a");
+  assert.equal(workflow["1"].inputs.reference_text, "Transcript stored in the registry.");
+  assert.equal(workflow["1"].inputs.language, "de"); // language comes from the stored entry
+  assert.equal(workflow["1"].inputs.text, "Hello from a project asset.");
+  assert.deepEqual(await readFile(path.join(narrationDir, "script.job-voice.flac")), makeFlac());
+});
+
+test("voice mode: per-call language wins over the stored one", async (t) => {
+  const { env, state } = await startComfy(t, freshState());
+  const { workspace } = await makeInput(t);
+  const voicesDir = await makeVoiceStore(t);
+  const runner = createFishAudioRunner({ env, voicesDir });
+
+  await runner(
+    job("job-voice-en", { voice: "pantek", reference_filename: undefined, reference_text: undefined, language: "en" }),
+    { workspace, signal: new AbortController().signal }
+  );
+  assert.equal(state.prompts[0].prompt["1"].inputs.language, "en");
+});
+
+test("voice mode: falls back to FISH_AUDIO_LANGUAGE when the entry has none", async (t) => {
+  const { env, state } = await startComfy(t, freshState());
+  const { workspace } = await makeInput(t);
+  const voicesDir = await makeVoiceStore(t, [{ name: "nolang", refText: "Only words." }]);
+  const runner = createFishAudioRunner({ env, voicesDir });
+
+  await runner(
+    job("job-voice-def", { voice: "nolang", reference_filename: undefined, reference_text: undefined, language: undefined }),
+    { workspace, signal: new AbortController().signal }
+  );
+  assert.equal(state.prompts[0].prompt["1"].inputs.language, "de");
+});
+
+test("voice wins over a raw reference pair", async (t) => {
+  const { env, state } = await startComfy(t, freshState());
+  const { workspace } = await makeInput(t);
+  const voicesDir = await makeVoiceStore(t, [{ name: "pantek", refText: "Store transcript.", language: "de" }]);
+  const runner = createFishAudioRunner({ env, voicesDir });
+
+  await runner(
+    job("job-voice-wins", { voice: "pantek", reference_text: "Raw transcript must be ignored." }),
+    { workspace, signal: new AbortController().signal }
+  );
+  assert.ok(state.uploads[0].includes("STORE-AUDIO-BYTES"));
+  assert.ok(!state.uploads[0].includes("VOICEREF-AUDIO-BYTES"));
+  assert.equal(state.prompts[0].prompt["1"].inputs.reference_text, "Store transcript.");
+});
+
+test("voice mode: unknown, legacy and built-in voices fail cleanly before contacting ComfyUI", async (t) => {
+  const { env, state } = await startComfy(t, freshState());
+  const { workspace } = await makeInput(t);
+  const legacyStore = await makeVoiceStore(t, [{ name: "legacy", refText: null, language: "de" }]);
+  const runner = createFishAudioRunner({ env, voicesDir: await makeVoiceStore(t) });
+  const legacyRunner = createFishAudioRunner({ env, voicesDir: legacyStore });
+  const signal = new AbortController().signal;
+
+  await assert.rejects(
+    () => runner(job("v1", { voice: "ghost", reference_filename: undefined, reference_text: undefined }), { workspace, signal }),
+    /Unknown stored voice "ghost"/
+  );
+  await assert.rejects(
+    () => legacyRunner(job("v2", { voice: "legacy", reference_filename: undefined, reference_text: undefined }), { workspace, signal }),
+    /no reference transcript/
+  );
+  await assert.rejects(
+    () => runner(job("v3", { voice: "bad name!", reference_filename: undefined, reference_text: undefined }), { workspace, signal }),
+    /Voice name/
+  );
+  await assert.rejects(
+    () => runner(job("v4", { voice: "default", reference_filename: undefined, reference_text: undefined }), { workspace, signal }),
+    /built-in voice/
+  );
+  assert.equal(state.requests.length, 0);
+});
+
+test("voice mode: enforces the store sample byte cap and store-absent runners reject voice mode", async (t) => {
+  const tight = await startComfy(t, freshState());
+  const { workspace } = await makeInput(t);
+  const voicesDir = await makeVoiceStore(t);
+  const runner = createFishAudioRunner({
+    env: { ...tight.env, FISH_AUDIO_MAX_AUDIO_BYTES: "10" },
+    voicesDir,
+  });
+  await assert.rejects(
+    () => runner(job("cap", { voice: "pantek", reference_filename: undefined, reference_text: undefined }), { workspace, signal: new AbortController().signal }),
+    /Voice sample "pantek" exceeds/
+  );
+  assert.equal(tight.state.requests.length, 0);
+
+  const noStore = await startComfy(t, freshState());
+  const noStoreRunner = createFishAudioRunner({ env: noStore.env });
+  await assert.rejects(
+    () => noStoreRunner(job("ns", { voice: "pantek", reference_filename: undefined, reference_text: undefined }), { workspace, signal: new AbortController().signal }),
+    /voice store|No voice store/
+  );
+});
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
