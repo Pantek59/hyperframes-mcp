@@ -129,6 +129,8 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "fish_audio_tts"));
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "comfyui_status"));
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "whisperx_transcribe"));
+  const fishTool = toolResponse.result.tools.find((tool) => tool.name === "fish_audio_tts");
+  assert.ok(fishTool?.inputSchema?.properties?.voice, "fish_audio_tts advertises the global-voice param");
 
   const callTool = async (args) => {
     const result = await fetch(`${url}/mcp`, {
