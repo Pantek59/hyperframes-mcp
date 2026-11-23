@@ -24,16 +24,19 @@
  * at the workspace, so voice samples are never publicly reachable.
  *
  * Safety mirrors tts-api.js: bounded reads, no leaking of remote error
- * bodies, single-decode path handling.
+ * bodies, single-decode path handling. Network failures are enriched with
+ * the configured origin and the OS cause code (see fetch-utils.js).
  */
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { upstreamFetch, validateHttpOrigin } from "./fetch-utils.js";
 import { getTtsApiConfig } from "./tts-api.js";
 import { resolveAssetInput } from "./asset-ops.js";
 
 const DEFAULT_MAX_SAMPLE_BYTES = 25 * 1024 * 1024; // 25 MB
 const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024; // 64 KB
+const DEFAULT_LIST_TIMEOUT_MS = 10_000;
 
 const SAMPLE_EXTS = new Set([
   "mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "opus", "aiff", "aif", "webm", "mp4",
@@ -62,18 +65,8 @@ function positiveInt(value, fallback) {
 }
 
 /** Validate the base URL exactly like the speech endpoint does. */
-function ttsApiUrl(baseUrl, route) {
-  if (!baseUrl) throw new Error("TTS API is not configured: set TTS_API_BASE_URL");
-  let base;
-  try {
-    base = new URL(baseUrl);
-  } catch {
-    throw new Error("TTS_API_BASE_URL must be a valid HTTP(S) base URL");
-  }
-  if (!new Set(["http:", "https:"]).has(base.protocol) || base.username || base.password ||
-      base.search || base.hash || (base.pathname !== "/" && base.pathname !== "")) {
-    throw new Error("TTS_API_BASE_URL must be an HTTP(S) origin without credentials or a path");
-  }
+export function ttsApiUrl(baseUrl, route) {
+  const base = validateHttpOrigin(baseUrl, "TTS API", "TTS_API_BASE_URL");
   return new URL(route, base);
 }
 
@@ -244,16 +237,16 @@ async function uploadUpstream({ config, fetchImpl, samplePath, sampleBytes }, { 
   form.append("consent", consent);
   if (refText) form.append("ref_text", refText);
   if (speakerDescription) form.append("speaker_description", speakerDescription);
-  const response = await fetchImpl(endpoint, {
+  const response = await upstreamFetch(fetchImpl, endpoint, {
     method: "POST",
     headers: authHeaders(config, "application/json"),
     body: form,
     signal,
     redirect: "error",
-  });
+  }, "TTS voices API");
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
-    throw new Error(`TTS voices API returned HTTP ${response.status}`);
+    throw new Error(`TTS voices API (${endpoint.origin}) returned HTTP ${response.status}`);
   }
   await ensureJson(response, DEFAULT_MAX_RESPONSE_BYTES);
 }
@@ -405,11 +398,17 @@ export function createTtsUploadVoiceRunner({ env = process.env, voicesDir, fetch
 export async function listVoices({ env = process.env, voicesDir, fetchImpl = globalThis.fetch } = {}) {
   const config = getTtsApiConfig(env);
   const endpoint = ttsApiUrl(config.baseUrl, "/v1/audio/voices");
-  if (typeof fetchImpl !== "function") throw new Error("This Node.js runtime does not provide fetch");
-  const response = await fetchImpl(endpoint, { headers: authHeaders(config, "application/json"), redirect: "error" });
+  // Bounded by TTS_API_LIST_TIMEOUT_MS so a hung upstream cannot block the
+  // tool call forever (10 s default).
+  const timeoutMs = positiveInt(env.TTS_API_LIST_TIMEOUT_MS, DEFAULT_LIST_TIMEOUT_MS);
+  const response = await upstreamFetch(fetchImpl, endpoint, {
+    headers: authHeaders(config, "application/json"),
+    redirect: "error",
+    signal: AbortSignal.timeout(timeoutMs),
+  }, "TTS voices API");
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
-    throw new Error(`TTS voices API returned HTTP ${response.status}`);
+    throw new Error(`TTS voices API (${endpoint.origin}) returned HTTP ${response.status}`);
   }
   const upstream = await ensureJson(response, DEFAULT_MAX_RESPONSE_BYTES);
   if (!upstream || typeof upstream !== "object" || Array.isArray(upstream)) {
@@ -478,11 +477,15 @@ export async function deleteVoice({ env = process.env, voicesDir, fetchImpl = gl
   }
   const config = getTtsApiConfig(env);
   const endpoint = ttsApiUrl(config.baseUrl, `/v1/audio/voices/${encodeURIComponent(clean)}`);
-  if (typeof fetchImpl !== "function") throw new Error("This Node.js runtime does not provide fetch");
-  const response = await fetchImpl(endpoint, { method: "DELETE", headers: authHeaders(config, "application/json"), signal, redirect: "error" });
+  const response = await upstreamFetch(fetchImpl, endpoint, {
+    method: "DELETE",
+    headers: authHeaders(config, "application/json"),
+    signal,
+    redirect: "error",
+  }, "TTS voices API");
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
-    throw new Error(`TTS voices API returned HTTP ${response.status}`);
+    throw new Error(`TTS voices API (${endpoint.origin}) returned HTTP ${response.status}`);
   }
   await ensureJson(response, DEFAULT_MAX_RESPONSE_BYTES).catch(() => ({}));
   await removeFromStore(voicesDir, clean);

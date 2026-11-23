@@ -465,3 +465,79 @@ test("getStoredVoice resolves stored clones with metadata; unknown names and bui
   await assert.rejects(() => getStoredVoice(voicesDir, "bad name!"), /Voice name/);
   await assert.rejects(() => getStoredVoice(voicesDir, "default"), /built-in voice/);
 });
+
+const DEAD_ORIGIN = "http://127.0.0.1:59999";
+const refusedFetcher = async () => {
+  throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+};
+
+test("listVoices enriches connection failures with origin + cause code and times out", async (t) => {
+  const seen = {};
+  const fetchImpl = async (url, init) => {
+    seen.url = url;
+    seen.signal = init?.signal;
+    return refusedFetcher();
+  };
+  await assert.rejects(
+    () => listVoices({ env: ENV(DEAD_ORIGIN), voicesDir: null, fetchImpl }),
+    (error) =>
+      error.message.includes(`TTS voices API (${DEAD_ORIGIN}) request failed: fetch failed (ECONNREFUSED)`)
+  );
+  assert.equal(String(seen.url), `${DEAD_ORIGIN}/v1/audio/voices`);
+  assert.ok(seen.signal instanceof AbortSignal); // bounded: TTS_API_LIST_TIMEOUT_MS
+});
+
+test("listVoices honors TTS_API_LIST_TIMEOUT_MS for the upstream fetch", async () => {
+  const fetchImpl = (url, init) => new Promise((_, reject) => {
+    // setTimeout keeps a ref'd handle alive while we wait for the (unref'd)
+    // AbortSignal.timeout to fire — otherwise the test harness drains the
+    // event loop before the rejection settles.
+    const keeper = setTimeout(() => reject(new Error("test fixture timed out")), 2000);
+    init.signal.addEventListener("abort", () => {
+      clearTimeout(keeper);
+      reject(init.signal.reason);
+    });
+  });
+  await assert.rejects(
+    () => listVoices({ env: { ...ENV(DEAD_ORIGIN), TTS_API_LIST_TIMEOUT_MS: "50" }, voicesDir: null, fetchImpl }),
+    (error) =>
+      error.message.includes(`TTS voices API (${DEAD_ORIGIN}) request failed`) &&
+      /aborted due to timeout|TimeoutError/i.test(error.message)
+  );
+});
+
+test("tts_upload_voice enriches connection failures with origin + cause code and stores nothing", async (t) => {
+  const { workspace, voicesDir } = await makeProject(t);
+  const runner = createTtsUploadVoiceRunner({ env: ENV(DEAD_ORIGIN), voicesDir, fetchImpl: refusedFetcher });
+  await assert.rejects(
+    () => runner(job({ filename: "narration/sample.mp3", name: "narrator", consent: "ok", refText: "t" }), { workspace, signal: new AbortController().signal }),
+    (error) =>
+      error.message.includes(`TTS voices API (${DEAD_ORIGIN}) request failed: fetch failed (ECONNREFUSED)`)
+  );
+  assert.deepEqual(await listFromStore(voicesDir), []);
+});
+
+test("tts_delete_voice enriches connection failures with origin + cause code", async (t) => {
+  const service = await startService(async (req, res) => {
+    if (req.method === "POST" && req.url === "/v1/audio/voices") {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end("{}");
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  t.after(service.close);
+  const { workspace, voicesDir } = await makeProject(t);
+  const runner = createTtsUploadVoiceRunner({ env: ENV(service.baseUrl), voicesDir });
+  await runner(job({ filename: "narration/sample.mp3", name: "narrator", consent: "ok", refText: "t" }), { workspace, signal: new AbortController().signal });
+
+  await assert.rejects(
+    () => deleteVoice({ env: ENV(DEAD_ORIGIN), voicesDir, fetchImpl: refusedFetcher }, "narrator"),
+    (error) =>
+      error.message.includes(`TTS voices API (${DEAD_ORIGIN}) request failed: fetch failed (ECONNREFUSED)`)
+  );
+  // the store entry survives a failed upstream delete (delete happens after)
+  assert.equal((await listFromStore(voicesDir)).length, 1);
+});

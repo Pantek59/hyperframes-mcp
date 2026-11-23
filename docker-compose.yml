@@ -32,6 +32,7 @@ services:
       TTS_API_VOICE: ${TTS_API_VOICE:-default}
       TTS_API_API_KEY: ${TTS_API_API_KEY:-}
       TTS_API_TIMEOUT_MS: ${TTS_API_TIMEOUT_MS:-300000}
+      TTS_API_LIST_TIMEOUT_MS: ${TTS_API_LIST_TIMEOUT_MS:-10000}
       TTS_API_MAX_TEXT_BYTES: ${TTS_API_MAX_TEXT_BYTES:-65536}
       TTS_API_MAX_AUDIO_BYTES: ${TTS_API_MAX_AUDIO_BYTES:-26214400}
       # Voice cloning: max size of an uploaded clone sample (mp3/wav/…)

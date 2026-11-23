@@ -1,4 +1,5 @@
 import path from "node:path";
+import { upstreamFetch, validateHttpOrigin } from "./fetch-utils.js";
 import {
   publishAssetOutput,
   readText,
@@ -25,17 +26,7 @@ export function getTtsApiConfig(env = process.env) {
 }
 
 function speechEndpoint(baseUrl) {
-  if (!baseUrl) throw new Error("TTS API is not configured: set TTS_API_BASE_URL");
-  let base;
-  try {
-    base = new URL(baseUrl);
-  } catch {
-    throw new Error("TTS_API_BASE_URL must be a valid HTTP(S) base URL");
-  }
-  if (!new Set(["http:", "https:"]).has(base.protocol) || base.username || base.password ||
-      base.search || base.hash || (base.pathname !== "/" && base.pathname !== "")) {
-    throw new Error("TTS_API_BASE_URL must be an HTTP(S) origin without credentials or a path");
-  }
+  const base = validateHttpOrigin(baseUrl, "TTS API", "TTS_API_BASE_URL");
   return new URL("/v1/audio/speech", base);
 }
 
@@ -125,7 +116,7 @@ export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.f
     const headers = { "content-type": "application/json", accept: "audio/wav" };
     if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
     const speak = () =>
-      fetchImpl(endpoint, {
+      upstreamFetch(fetchImpl, endpoint, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -136,7 +127,7 @@ export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.f
         }),
         signal,
         redirect: "error",
-      });
+      }, "TTS API /v1/audio/speech");
     let response = await speak();
     const warnings = [];
     if (!response.ok && reRegister && (response.status === 400 || response.status === 404)) {
@@ -155,7 +146,7 @@ export function createTtsApiRunner({ env = process.env, fetchImpl = globalThis.f
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
-      throw new Error(`TTS API returned HTTP ${response.status}`);
+      throw new Error(`TTS API (${endpoint.origin}) returned HTTP ${response.status}`);
     }
     const audio = validateWav(
       await readBoundedResponse(response, config.maxAudioBytes),

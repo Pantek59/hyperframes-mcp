@@ -9,6 +9,7 @@
  * bodies are never surfaced — errors carry only HTTP status counts/summary.
  */
 import { randomUUID } from "node:crypto";
+import { describeFetchError, validateHttpOrigin } from "./fetch-utils.js";
 
 const MAX_JSON_BYTES = 4 * 1024 * 1024;
 
@@ -19,26 +20,11 @@ export function getComfyConfig(env = process.env) {
   };
 }
 
-/** Fetch/network failures lose details in Node; surface the cause code. */
-export function describeFetchError(error) {
-  const message = String(error?.message || error || "request failed");
-  const code = error?.cause?.code || error?.code;
-  return code ? `${message} (${code})` : message;
-}
+export { describeFetchError };
 
 export function createComfyClient({ baseUrl, apiKey, fetchImpl = globalThis.fetch } = {}) {
   baseUrl = String(baseUrl || "").trim();
-  if (!baseUrl) throw new Error("ComfyUI is not configured: set COMFYUI_BASE_URL");
-  let base;
-  try {
-    base = new URL(baseUrl);
-  } catch {
-    throw new Error("COMFYUI_BASE_URL must be a valid HTTP(S) base URL");
-  }
-  if (!new Set(["http:", "https:"]).has(base.protocol) || base.username || base.password ||
-      base.search || base.hash || (base.pathname !== "/" && base.pathname !== "")) {
-    throw new Error("COMFYUI_BASE_URL must be an HTTP(S) origin without credentials or a path");
-  }
+  const base = validateHttpOrigin(baseUrl, "ComfyUI", "COMFYUI_BASE_URL");
   apiKey = String(apiKey || "").trim();
   if (typeof fetchImpl !== "function") throw new Error("This Node.js runtime does not provide fetch");
 

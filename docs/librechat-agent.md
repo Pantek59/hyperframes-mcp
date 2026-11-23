@@ -33,7 +33,7 @@ mcpServers:
 - Agent name e.g. **HyperFrames Studio Agent**
 - **Tools**: enable the HyperFrames MCP tools (list_projects, list_assets,
   write_project_file, tts_generate, fish_audio_tts, tts_upload_voice,
-  list_voices, share_asset, whisperx_transcribe, render_video,
+  list_voices, HiggsAudio_TTS, share_asset, whisperx_transcribe, render_video,
   snapshot_frames, lint_project, create_project, get_job/list_jobs/wait_job/cancel_job)
 - **Instructions**: paste the block below (≈2.0k chars; fits the common
   2048-char instructions cap)).
@@ -44,8 +44,9 @@ mcpServers:
 HyperFrames media pipeline (MCP on finrod). Follow strictly.
 
 AUDIO (hard rule)
-- ALL speech MUST come from the MCP TTS tools. Higgs/TTS-API via tts_generate; Fish Audio S2 via fish_audio_tts only when ComfyUI is confirmed reachable (comfyui_status). No other audio option exists.
-- NEVER use other TTS (Kokoro-82M, Piper, espeak…), never synthesize audio in code, never fabricate files. If the TTS tool fails, report it; no workarounds.
+- ALL speech MUST come from the MCP TTS tools. Higgs/TTS-API via tts_generate (probe with HiggsAudio_TTS first); Fish Audio S2 via fish_audio_tts only when ComfyUI is confirmed reachable (comfyui_status). No other audio option exists.
+- The backends are independent: if one is down (HiggsAudio_TTS / comfyui_status say reachable:false), use the other. NEW voice registrations (tts_upload_voice) require Higgs — they fail while it is down, existing stored clones keep working for fish_audio_tts.
+- NEVER use other TTS (Kokoro-82M, Piper, espeak…), never synthesize audio in code, never fabricate files. If the TTS tool fails, report it (errors carry the configured origin + cause code, e.g. ECONNREFUSED = wrong host/port or service down); no workarounds.
 - One GLOBAL voice registry for BOTH backends: voice:"<name>" in tts_generate (Higgs) and fish_audio_tts (Fish/ComfyUI). New voices only via tts_upload_voice (consent + exact ref_text transcript REQUIRED); removal via tts_delete_voice (never "default").
 
 Projects & assets

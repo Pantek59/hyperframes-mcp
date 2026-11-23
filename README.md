@@ -20,6 +20,7 @@ surface of the Studio.
 | `list_voices` | Lists available voices (default + clones with upstream-availability and `fishReady` flags, plus unregistered `inbox/` drops waiting for registration) |
 | `tts_delete_voice` | Permanently removes a cloned voice (upstream + global store); `default` is protected |
 | `fish_audio_tts` | Enqueues TTS: text asset → FLAC (Fish Audio S2 voice cloning on ComfyUI). Reference voice via a registered `voice` (global store) or a raw `reference_filename` + `reference_text` pair |
+| `HiggsAudio_TTS` | Reports whether the Higgs/TTS-API backend (behind `tts_generate` and voice registration) is reachable: GET `/v1/audio/voices` (5 s), `base_url`, latency, configured model/voice, local queue |
 | `comfyui_status` | Reports whether the ComfyUI TTS backend is running and reachable (version, GPU, queue load) |
 | `share_asset` | Copies an asset into `renders/` with an unguessable name and returns the token-free public download URL |
 | `whisperx_transcribe` | Transcribes an audio file from `assets/` with local CPU WhisperX into a timed JSON transcript |
@@ -45,7 +46,9 @@ status survives restarts; background job concurrency is capped by `HF_JOB_CONCUR
 
 - **`tts_generate`:** Reads UTF-8 text from `<project>/assets/...` and calls a configured OpenAI-compatible TTS endpoint (`/v1/audio/speech`). Generates a `.wav` file saved directly next to the input file in `assets/`. An optional per-call `voice` parameter overrides the server default (`TTS_API_VOICE`) — e.g. a cloned voice.
 - **`tts_upload_voice` (voice cloning):** Uploads an audio sample from `<project>/assets/...` (or dropped directly into the global voice store's root/`inbox/`) as a reference to the TTS voices endpoint (`POST /v1/audio/voices`, multipart) and registers it under a `name`. **The registry is shared by both TTS backends:** Higgs/TTS-API uses the voice by `name`, and Fish Audio S2 (ComfyUI) clones per job from the stored sample + transcript. Therefore `ref_text` (the exact transcript) is **required**, plus an optional 2–3 letter `language` used as the Fish default. The upstream API **requires a `consent` statement** — only clone voices you are authorized to use (your own, or with the speaker's explicit permission). Confirm registration with `list_voices`. Sample size is capped by `TTS_API_MAX_SAMPLE_BYTES` (default 25 MB).
-- **`list_voices`:** Lists the available voices (`default` + registered clones with `availableUpstream` and `fishReady` flags) — use it to pick the `voice` for `tts_generate` and `fish_audio_tts`.
+- **`list_voices`:** Lists the available voices (`default` + registered clones with `availableUpstream` and `fishReady` flags) — use it to pick the `voice` for `tts_generate` and `fish_audio_tts`. When the upstream is unreachable it fails with a diagnosable message that carries the configured origin and the OS cause code (e.g. `TTS voices API (http://10.10.10.68:8000) request failed: fetch failed (ECONNREFUSED)`).
+- **`HiggsAudio_TTS`:** Probes the Higgs/TTS-API backend from inside the server (`GET /v1/audio/voices`, 5 s timeout) and reports `reachable` / `base_url` / `latency_ms` / configured `model` + `voice` / local queue. Counterpart of `comfyui_status` for the primary backend — never itself an error, on outage it returns `reachable: false` with the cause code (e.g. `ECONNREFUSED`).
+- **Backend independence:** `tts_generate` and new voice registrations (`tts_upload_voice`) need the Higgs/TTS-API; `fish_audio_tts` needs ComfyUI. If one backend is down (check `HiggsAudio_TTS` / `comfyui_status`), the other stays usable — already-stored clones keep working for `fish_audio_tts`, while `tts_upload_voice` (upstream registration happens first) is unavailable until Higgs is back.
 - **`share_asset`:** Copies a file from `assets/` into the project's `renders/` folder under an unguessable random name and returns the token-free public download URL (when `PUBLIC_BASE_URL` is set). Use this whenever a user needs to *click* a link to a file — browsers cannot send `Authorization` headers, and only `renders/**` is served publicly.
 - **`whisperx_transcribe`:** Runs WhisperX locally on CPU against an audio file under `<project>/assets/...`. Saves a timed JSON transcript with word- and segment-level timestamps next to the original asset. Models are downloaded on first use and cached persistently (`WHISPERX_MODEL_CACHE_DIR`).
 
@@ -372,11 +375,12 @@ curl -sI "https://files.<domain>/health"
 | `FISH_AUDIO_MODEL_PATH` / `FISH_AUDIO_WORKFLOW_JSON` | _(empty)_ | Optional: override the Fish node's `model_path` widget / replace the built-in workflow (API-format JSON with a Fish TTS + LoadAudio node) |
 | `PUBLIC_BASE_URL` | _(empty)_ | Public files host (no trailing slash); when set, `render` jobs return `files[].url` download links |
 | `HF_FILES_PUBLIC_PREFIX_ONLY` | _(off)_ | Optional: restrict `/files/` to `<project>/<prefix>/…` (`renders`, CSV list, or `true` = `renders`) |
-| `TTS_API_BASE_URL` | _(empty)_ | Base URL of OpenAI-compatible TTS endpoint (appends `/v1/audio/speech`) |
+| `TTS_API_BASE_URL` | _(empty)_ | Base URL of OpenAI-compatible TTS endpoint (appends `/v1/audio/speech`); probe with `HiggsAudio_TTS` |
 | `TTS_API_MODEL` | _(empty)_ | TTS model identifier |
 | `TTS_API_VOICE` | _(empty)_ | TTS voice identifier |
 | `TTS_API_API_KEY` | _(empty)_ | Optional bearer token for TTS API |
 | `TTS_API_TIMEOUT_MS` | `300000` | TTS request timeout (5 min) |
+| `TTS_API_LIST_TIMEOUT_MS` | `10000` | Timeout for the `list_voices` upstream fetch (`GET /v1/audio/voices`) |
 | `TTS_API_MAX_TEXT_BYTES` | `65536` | Max UTF-8 text payload for TTS (64 KB) |
 | `TTS_API_MAX_AUDIO_BYTES` | `26214400` | Max generated WAV audio response size (25 MB) |
 | `WHISPERX_EXECUTABLE` | `/opt/whisperx-venv/bin/whisperx` | Path to WhisperX executable |

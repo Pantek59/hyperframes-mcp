@@ -47,6 +47,10 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   await writeFile(path.join(projectAssets, "script.txt"), "Read this aloud.");
   const serviceRequests = [];
   const service = createHttpServer(async (request, response) => {
+    if (request.method === "GET" && request.url === "/v1/audio/voices") {
+      response.writeHead(200, { "content-type": "application/json" });
+      return response.end(JSON.stringify({ voices: ["default"], uploaded_voices: [], cache_stats: {} }));
+    }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     serviceRequests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
@@ -55,7 +59,7 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   });
   await new Promise((resolve) => service.listen(0, "127.0.0.1", resolve));
   const ttsUrl = `http://127.0.0.1:${service.address().port}`;
-  t.after(() => new Promise((resolve, reject) => service.close((error) => error ? reject(error) : resolve())));
+  t.after(() => new Promise((resolve) => service.close(() => resolve())));
   const child = spawn(process.execPath, ["src/index.js"], {
     cwd: ROOT,
     env: {
@@ -112,6 +116,7 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   assert.ok(index.tools.includes("tts_generate"));
   assert.ok(index.tools.includes("fish_audio_tts"));
   assert.ok(index.tools.includes("comfyui_status"));
+  assert.ok(index.tools.includes("HiggsAudio_TTS"));
   assert.ok(index.tools.includes("whisperx_transcribe"));
 
   const mcp = await fetch(`${url}/mcp`, {
@@ -128,11 +133,12 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "tts_generate"));
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "fish_audio_tts"));
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "comfyui_status"));
+  assert.ok(toolResponse.result.tools.some((tool) => tool.name === "HiggsAudio_TTS"));
   assert.ok(toolResponse.result.tools.some((tool) => tool.name === "whisperx_transcribe"));
   const fishTool = toolResponse.result.tools.find((tool) => tool.name === "fish_audio_tts");
   assert.ok(fishTool?.inputSchema?.properties?.voice, "fish_audio_tts advertises the global-voice param");
 
-  const callTool = async (args) => {
+  const callTool = async (name, args) => {
     const result = await fetch(`${url}/mcp`, {
       method: "POST",
       headers: {
@@ -144,14 +150,14 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
         jsonrpc: "2.0",
         id: 2,
         method: "tools/call",
-        params: { name: "tts_generate", arguments: args },
+        params: { name, arguments: args ?? {} },
       }),
     });
     assert.equal(result.status, 200);
     return result.json();
   };
 
-  const synchronous = await callTool({
+  const synchronous = await callTool("tts_generate", {
     project: "project",
     filename: "narration/script.txt",
     wait: true,
@@ -161,7 +167,7 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
   assert.equal(synchronousDetail.status, "succeeded");
   assert.match(synchronousDetail.artifacts[0], /^assets\/narration\/script\..+\.wav$/);
 
-  const queued = await callTool({ project: "project", filename: "narration/script.txt" });
+  const queued = await callTool("tts_generate", { project: "project", filename: "narration/script.txt" });
   const queuedSummary = JSON.parse(queued.result.content[0].text);
   assert.ok(["queued", "running"].includes(queuedSummary.status));
   let queuedDetail;
@@ -182,4 +188,27 @@ test("HTTP tool index advertises TTS API", { timeout: 15000 }, async (t) => {
     voice: "mcp-test-voice",
     response_format: "wav",
   });
+
+  // HiggsAudio_TTS: happy path against the live stub
+  const higgsUp = await callTool("HiggsAudio_TTS");
+  const higgsUpDetail = JSON.parse(higgsUp.result.content[0].text);
+  assert.equal(higgsUpDetail.reachable, true);
+  assert.equal(higgsUpDetail.http_status, 200);
+  assert.equal(higgsUpDetail.base_url, ttsUrl);
+  assert.equal(higgsUpDetail.model, "mcp-test-model");
+  assert.equal(higgsUpDetail.voice, "mcp-test-voice");
+  assert.equal(higgsUpDetail.configured, true);
+  assert.ok(higgsUpDetail.latency_ms >= 0);
+  assert.ok(higgsUpDetail.local_queue);
+
+  // HiggsAudio_TTS: probes the TTS-API from inside the server → dead origin
+  // becomes a diagnosable reachable:false with the OS cause code
+  await new Promise((resolve) => service.close(() => resolve()));
+  const higgsDown = await callTool("HiggsAudio_TTS");
+  const higgsDownDetail = JSON.parse(higgsDown.result.content[0].text);
+  assert.equal(higgsDownDetail.reachable, false);
+  assert.equal(higgsDownDetail.configured, true);
+  assert.equal(higgsDownDetail.base_url, ttsUrl);
+  assert.match(higgsDownDetail.error, /ECONNREFUSED/);
+  assert.ok(higgsDownDetail.local_queue);
 });

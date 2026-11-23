@@ -295,3 +295,23 @@ test("fails an unconfigured TTS API runner with an actionable message", async (t
     /TTS_API_BASE_URL/
   );
 });
+
+test("surfaces connection failures with the configured origin and cause code", async (t) => {
+  const { workspace, assetsDir } = await makeInput(t);
+  const baseUrl = "http://127.0.0.1:59999"; // nothing listens here
+  const runner = createTtsApiRunner({
+    env: { ...BASE_ENV, TTS_API_BASE_URL: baseUrl },
+    fetchImpl: async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } });
+    },
+  });
+
+  await assert.rejects(
+    () => runner(job(), { workspace, signal: new AbortController().signal }),
+    (error) =>
+      error.message.includes(
+        `TTS API /v1/audio/speech (${baseUrl}) request failed: fetch failed (ECONNREFUSED)`
+      )
+  );
+  assert.deepEqual(await readdir(assetsDir), ["script.txt"]);
+});

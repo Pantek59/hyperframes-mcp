@@ -34,17 +34,19 @@ import { withPublicUrls } from "./public-url.js";
 import { listAssets, addFileLinks, ASSETS_MAX_DEPTH, ASSETS_MAX_ENTRIES } from "./assets.js";
 import { handleFiles, parsePublicPrefixes } from "./files.js";
 import { isAuthorized, authEnabled } from "./auth.js";
-import { createTtsApiRunner } from "./tts-api.js";
+import { createTtsApiRunner, getTtsApiConfig } from "./tts-api.js";
 import { createWhisperXRunner } from "./whisperx.js";
 import {
   createTtsUploadVoiceRunner,
   listVoices,
   deleteVoice,
   reRegisterVoice,
+  ttsApiUrl,
 } from "./tts-voices.js";
 import { shareAssetToRenders } from "./share.js";
 import { createFishAudioRunner } from "./fish-audio.js";
-import { createComfyClient, describeFetchError, getComfyConfig } from "./comfyui.js";
+import { createComfyClient, getComfyConfig } from "./comfyui.js";
+import { describeFetchError } from "./fetch-utils.js";
 
 const HF_ROOT = process.env.HF_ROOT || "/app/hf";
 const HF_CLI =
@@ -463,7 +465,9 @@ function buildServer() {
         "Lista las voces disponibles en el TTS-API (/v1/audio/voices) más las voces clonadas en el almacén " +
         "global del servidor (independiente de proyectos, sirve a AMBOS backends). Cada clon lleva " +
         "`availableUpstream` (evicted = falso; se re-registra automáticamente en tts_generate) y `fishReady` " +
-        "(tiene transcript → usable con fish_audio_tts) — úsala para elegir el parámetro `voice`.",
+        "(tiene transcript → usable con fish_audio_tts) — úsala para elegir el parámetro `voice`. " +
+        "Fallará mientras el backend Higgs (TTS-API) esté caído — compruébalo con HiggsAudio_TTS; " +
+        "tts_upload_voice tampoco registra voces nuevas mientras esté caído, y fish_audio_tts sigue usable.",
       inputSchema: {},
     },
     async () => {
@@ -594,6 +598,52 @@ function buildServer() {
       if (!wait) return ok(jobSummary(job, "Encolado. Consulta con get_job / wait_job."));
       const done = await queue.waitFor(job.id, Math.min(timeout_ms || WAIT_MAX_MS, WAIT_MAX_MS));
       return done && done.status === "succeeded" ? ok(jobDetail(done)) : fail(jobDetail(done || job));
+    }
+  );
+
+  server.registerTool(
+    "HiggsAudio_TTS",
+    {
+      description:
+        "Comprueba si el backend Higgs/TTS-API (el motor por detrás de tts_generate y del registro de voces) " +
+        "está accesible: GET /v1/audio/voices con 5 s de timeout. Devuelve reachable, base_url, latencia, " +
+        "modelo/voz configurados y la cola local de jobs. Útil antes de encolar tts_generate. " +
+        "Si reachable=false, tts_generate y tts_upload_voice fallarán, pero fish_audio_tts (ComfyUI, " +
+        "véase comfyui_status) sigue disponible.",
+      inputSchema: {},
+    },
+    async () => {
+      const config = getTtsApiConfig(process.env);
+      const localQueue = queue.stats();
+      const summary = {
+        reachable: false,
+        configured: Boolean(config.baseUrl),
+        base_url: null,
+        model: config.model || null,
+        voice: config.voice || null,
+        local_queue: localQueue,
+      };
+      try {
+        const endpoint = ttsApiUrl(config.baseUrl, "/v1/audio/voices");
+        summary.base_url = endpoint.origin;
+        const started = performance.now();
+        const response = await fetch(endpoint, {
+          headers: {
+            accept: "application/json",
+            ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
+          },
+          signal: AbortSignal.timeout(5000),
+          redirect: "error",
+        });
+        summary.latency_ms = Math.round(performance.now() - started);
+        summary.reachable = response.ok;
+        summary.http_status = response.status;
+        if (!response.ok) await response.body?.cancel().catch(() => {});
+      } catch (error) {
+        summary.error = describeFetchError(error);
+        if (!summary.base_url) summary.base_url = config.baseUrl || null;
+      }
+      return ok(JSON.stringify(summary, null, 2));
     }
   );
 
@@ -883,6 +933,7 @@ async function startHttp() {
               "tts_delete_voice",
               "share_asset",
               "fish_audio_tts",
+              "HiggsAudio_TTS",
               "comfyui_status",
               "whisperx_transcribe",
               "create_project",
